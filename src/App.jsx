@@ -1,5 +1,15 @@
 import React, { useState, useEffect, useCallback, useRef } from "react";
-import { fetchEvents, createEventDB, addBuyerDB, markTicketUsedDB } from "./lib/db";
+import {
+  fetchOrganizerEvents,
+  fetchClientEvents,
+  createEventDB,
+  addBuyerDB,
+  markTicketUsedDB,
+  withdrawFundsDB,
+  openEventByCode,
+  recordEventAccess,
+} from "./lib/db";
+import { getSessionProfile, signUp, signIn, signOut } from "./lib/auth";
 
 /* ============================================================
    TIKÉ v3 — Billetterie par lien, paiement mobile money
@@ -10,6 +20,8 @@ import { fetchEvents, createEventDB, addBuyerDB, markTicketUsedDB } from "./lib/
    - Tableau de bord organisateur : revenus animés, courbe des
      ventes 7 jours, répartition par catégorie, taux de
      transformation, activité récente
+   - Comptes organisateur / client (Supabase Auth), retrait de
+     fonds en un clic, tableau de bord client (accès + billets)
    ============================================================ */
 
 const FONT_CSS = `
@@ -78,21 +90,8 @@ const tierSold = (ev, tierId) => ev.buyers.filter((b) => b.tierId === tierId).re
 const totalSold = (ev) => ev.buyers.reduce((s, b) => s + b.qty, 0);
 const totalCap = (ev) => ev.tiers.reduce((s, t) => s + t.capacity, 0);
 const revenue = (ev) => ev.buyers.reduce((s, b) => s + b.qty * b.unitPrice, 0);
-
-/* ---------- Stockage local (par appareil) ---------- */
-function lsGet(key, fallback) {
-  try {
-    const raw = localStorage.getItem(key);
-    return raw ? JSON.parse(raw) : fallback;
-  } catch {
-    return fallback;
-  }
-}
-function lsSet(key, value) {
-  try {
-    localStorage.setItem(key, JSON.stringify(value));
-  } catch {}
-}
+const withdrawnTotal = (ev) => (ev.withdrawals || []).reduce((s, w) => s + w.amount, 0);
+const availableFunds = (ev) => revenue(ev) * 0.95 - withdrawnTotal(ev);
 
 /* ---------- Hooks ---------- */
 function useCountUp(target, duration = 900) {
@@ -214,6 +213,28 @@ function Top({ title, onBack, right }) {
       </div>
       {right}
     </div>
+  );
+}
+
+function LogoutButton({ onClick }) {
+  return (
+    <button
+      onClick={onClick}
+      className="tk-press"
+      style={{
+        background: "transparent",
+        border: `1px solid ${C.line}`,
+        color: C.muted,
+        borderRadius: 10,
+        padding: "8px 12px",
+        fontSize: 12.5,
+        cursor: "pointer",
+        fontFamily: "'Space Grotesk', sans-serif",
+        whiteSpace: "nowrap",
+      }}
+    >
+      Déconnexion
+    </button>
   );
 }
 
@@ -389,12 +410,81 @@ function TierSplit({ ev }) {
   );
 }
 
+/* ---------- Carte billet (utilisée dans le tableau de bord client) ---------- */
+function TicketCard({ t, i = 0, muted = false }) {
+  return (
+    <Reveal i={i}>
+      <div className="tk-lift" style={{ ...S.card, padding: 0, overflow: "hidden", opacity: muted ? 0.6 : 1 }}>
+        <div style={{ padding: "18px 20px 16px" }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+            <div style={{ fontSize: 11, letterSpacing: 2, textTransform: "uppercase", color: C.amber, fontWeight: 700 }}>
+              {muted ? "Événement passé" : "Billet valide"}
+            </div>
+            <div
+              style={{
+                fontSize: 11,
+                fontWeight: 700,
+                background: "rgba(255,181,37,.14)",
+                border: `1px solid ${C.amber}`,
+                color: C.amber,
+                borderRadius: 999,
+                padding: "4px 10px",
+                letterSpacing: 1,
+                textTransform: "uppercase",
+              }}
+            >
+              {t.tierName}
+            </div>
+          </div>
+          <div style={{ fontFamily: "'Unbounded', sans-serif", fontWeight: 700, fontSize: 17, margin: "8px 0 6px" }}>{t.eventName}</div>
+          <div style={{ color: C.muted, fontSize: 13.5, lineHeight: 1.6 }}>
+            {t.date} à {t.time} · {t.venue}, {t.city}
+            <br />
+            Titulaire : <b style={{ color: C.text }}>{t.buyerName}</b>
+          </div>
+        </div>
+        <Perf />
+        <div style={{ padding: "16px 20px 18px", display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12 }}>
+          <div>
+            <div style={{ fontSize: 11, color: C.muted, letterSpacing: 1, textTransform: "uppercase", fontWeight: 700 }}>Code d'entrée</div>
+            <div style={{ fontFamily: "'Unbounded', sans-serif", fontWeight: 700, fontSize: 15, color: C.amber, marginTop: 4 }}>{t.id}</div>
+          </div>
+          <div
+            aria-hidden
+            style={{
+              width: 62,
+              height: 62,
+              background: C.text,
+              borderRadius: 8,
+              padding: 6,
+              display: "grid",
+              gridTemplateColumns: "repeat(6, 1fr)",
+              gap: 2,
+              boxSizing: "border-box",
+            }}
+          >
+            {Array.from({ length: 36 }).map((_, k) => (
+              <div
+                key={k}
+                style={{
+                  background: (t.id.charCodeAt(k % t.id.length) + k) % 3 === 0 ? C.bg : "transparent",
+                  borderRadius: 1,
+                }}
+              />
+            ))}
+          </div>
+        </div>
+      </div>
+    </Reveal>
+  );
+}
+
 /* ============================ App ============================ */
 export default function TikeApp() {
   const [view, setView] = useState("home");
-  const [creator, setCreator] = useState(null);
+  const [profile, setProfile] = useState(null);
+  const [pendingRole, setPendingRole] = useState("organizer");
   const [events, setEvents] = useState({});
-  const [myTickets, setMyTickets] = useState([]);
   const [activeCode, setActiveCode] = useState(null);
   const [toast, setToast] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -404,26 +494,59 @@ export default function TikeApp() {
     setTimeout(() => setToast(null), 2600);
   };
 
+  const loadOrganizerEvents = useCallback(async (userId) => {
+    try {
+      setEvents(await fetchOrganizerEvents(userId));
+    } catch (e) {
+      console.error(e);
+      notify("Impossible de charger tes événements.");
+    }
+  }, []);
+
+  const loadClientEvents = useCallback(async (userId) => {
+    try {
+      setEvents(await fetchClientEvents(userId));
+    } catch (e) {
+      console.error(e);
+      notify("Impossible de charger tes événements.");
+    }
+  }, []);
+
   useEffect(() => {
     (async () => {
-      const c = lsGet("tike:creator", null);
-      const tk = lsGet("tike:mytickets:v2", []);
-      if (c) setCreator(c);
-      if (tk) setMyTickets(tk);
-      try {
-        setEvents(await fetchEvents());
-      } catch (e) {
-        console.error("Échec du chargement des événements", e);
-        notify("Impossible de charger les événements — vérifie ta connexion.");
+      const p = await getSessionProfile();
+      if (p) {
+        setProfile(p);
+        if (p.role === "organizer") {
+          await loadOrganizerEvents(p.id);
+          setView("cDash");
+        } else {
+          await loadClientEvents(p.id);
+          setView("clientDash");
+        }
       }
       setLoading(false);
     })();
-  }, []);
+  }, []); // eslint-disable-line
 
-  const saveTickets = useCallback((next) => {
-    setMyTickets(next);
-    lsSet("tike:mytickets:v2", next);
-  }, []);
+  const handleAuthDone = async (p) => {
+    setProfile(p);
+    if (p.role === "organizer") {
+      await loadOrganizerEvents(p.id);
+      setView("cDash");
+    } else {
+      await loadClientEvents(p.id);
+      setView("clientDash");
+    }
+  };
+
+  const handleLogout = async () => {
+    await signOut();
+    setProfile(null);
+    setEvents({});
+    setActiveCode(null);
+    setView("home");
+  };
 
   const ev = activeCode ? events[activeCode] : null;
 
@@ -457,22 +580,21 @@ export default function TikeApp() {
           </div>
         ) : (
           <div className="tk-view" key={view}>
-            {view === "home" && <Home setView={setView} creator={creator} myTickets={myTickets} />}
-            {view === "cAuth" && (
-              <CreatorAuth
-                onBack={() => setView("home")}
-                onDone={(c) => {
-                  setCreator(c);
-                  lsSet("tike:creator", c);
-                  setView("cDash");
+            {view === "home" && (
+              <Home
+                onPickRole={(role) => {
+                  setPendingRole(role);
+                  setView("auth");
                 }}
               />
             )}
-            {view === "cDash" && (
+            {view === "auth" && <Auth role={pendingRole} onBack={() => setView("home")} onDone={handleAuthDone} />}
+
+            {view === "cDash" && profile && (
               <CreatorDash
-                creator={creator}
+                profile={profile}
                 events={events}
-                onBack={() => setView("home")}
+                onLogout={handleLogout}
                 onNew={() => setView("cNew")}
                 onOpen={(code) => {
                   setActiveCode(code);
@@ -482,7 +604,7 @@ export default function TikeApp() {
             )}
             {view === "cNew" && (
               <NewEvent
-                creator={creator}
+                profile={profile}
                 onBack={() => setView("cDash")}
                 onCreate={async (e) => {
                   try {
@@ -500,7 +622,26 @@ export default function TikeApp() {
               />
             )}
             {view === "cEvent" && ev && (
-              <CreatorEvent ev={ev} onBack={() => setView("cDash")} onScan={() => setView("cScan")} notify={notify} />
+              <CreatorEvent
+                ev={ev}
+                onBack={() => setView("cDash")}
+                onScan={() => setView("cScan")}
+                notify={notify}
+                onWithdraw={async (amount) => {
+                  try {
+                    await withdrawFundsDB(ev.code, amount);
+                  } catch (err) {
+                    console.error(err);
+                    notify("Échec du retrait — réessaie.");
+                    return;
+                  }
+                  setEvents((prev) => ({
+                    ...prev,
+                    [ev.code]: { ...prev[ev.code], withdrawals: [...prev[ev.code].withdrawals, { amount, ts: Date.now() }] },
+                  }));
+                  notify("Fonds retirés !");
+                }}
+              />
             )}
             {view === "cScan" && ev && (
               <Scanner
@@ -522,20 +663,25 @@ export default function TikeApp() {
                 }}
               />
             )}
-            {view === "kAccess" && (
-              <ClientAccess
+
+            {view === "clientDash" && profile && (
+              <ClientDash
+                profile={profile}
                 events={events}
-                onBack={() => setView("home")}
-                onFound={(code) => {
+                onLogout={handleLogout}
+                onOpenEvent={(code) => {
                   setActiveCode(code);
                   setView("kEvent");
                 }}
+                onOpenedNew={(code, e) => setEvents((prev) => ({ ...prev, [code]: e }))}
+                notify={notify}
               />
             )}
-            {view === "kEvent" && ev && <ClientEvent ev={ev} onBack={() => setView("kAccess")} onBuy={() => setView("kPay")} />}
-            {view === "kPay" && ev && (
+            {view === "kEvent" && ev && <ClientEvent ev={ev} onBack={() => setView("clientDash")} onBuy={() => setView("kPay")} />}
+            {view === "kPay" && ev && profile && (
               <Payment
                 ev={ev}
+                profile={profile}
                 onBack={() => setView("kEvent")}
                 onPaid={async ({ buyerName, buyerPhone, qty, operator, tier }) => {
                   const ids = Array.from({ length: qty }, () => "TK-" + genCode(4) + "-" + genCode(4));
@@ -551,7 +697,7 @@ export default function TikeApp() {
                     ts: Date.now(),
                   };
                   try {
-                    await addBuyerDB(ev.code, buyer);
+                    await addBuyerDB(ev.code, profile.id, buyer);
                   } catch (err) {
                     console.error(err);
                     notify("Échec de l'enregistrement du paiement — réessaie.");
@@ -561,26 +707,11 @@ export default function TikeApp() {
                     ...prev,
                     [ev.code]: { ...prev[ev.code], buyers: [...prev[ev.code].buyers, buyer] },
                   }));
-                  const newTickets = ids.map((id) => ({
-                    id,
-                    eventCode: ev.code,
-                    eventName: ev.name,
-                    date: ev.date,
-                    time: ev.time,
-                    venue: ev.venue,
-                    city: ev.city,
-                    tierName: tier.name,
-                    price: tier.price,
-                    buyerName,
-                    ts: Date.now(),
-                  }));
-                  saveTickets([...myTickets, ...newTickets]);
-                  setView("kTickets");
+                  setView("clientDash");
                   notify("Paiement confirmé — billets reçus 🎟️");
                 }}
               />
             )}
-            {view === "kTickets" && <MyTickets tickets={myTickets} onBack={() => setView("home")} />}
           </div>
         )}
       </div>
@@ -610,7 +741,7 @@ export default function TikeApp() {
 }
 
 /* ============================ Accueil ============================ */
-function Home({ setView, creator, myTickets }) {
+function Home({ onPickRole }) {
   return (
     <div>
       <Reveal i={0}>
@@ -637,7 +768,7 @@ function Home({ setView, creator, myTickets }) {
       <div style={{ display: "grid", gap: 14, marginTop: 26 }}>
         <Reveal i={1}>
           <button
-            onClick={() => setView(creator ? "cDash" : "cAuth")}
+            onClick={() => onPickRole("organizer")}
             className="tk-press tk-lift"
             style={{ ...S.card, textAlign: "left", cursor: "pointer", color: C.text, width: "100%" }}
           >
@@ -645,73 +776,136 @@ function Home({ setView, creator, myTickets }) {
             <div style={{ fontFamily: "'Unbounded', sans-serif", fontWeight: 700, fontSize: 16, margin: "8px 0 4px" }}>
               Je suis organisateur
             </div>
-            <div style={{ color: C.muted, fontSize: 13.5 }}>
-              {creator ? `Reprendre — ${creator.name}` : "Créer un événement et vendre des billets"}
-            </div>
+            <div style={{ color: C.muted, fontSize: 13.5 }}>Créer un événement et vendre des billets</div>
           </button>
         </Reveal>
 
         <Reveal i={2}>
           <button
-            onClick={() => setView("kAccess")}
+            onClick={() => onPickRole("client")}
             className="tk-press tk-lift"
             style={{ ...S.card, textAlign: "left", cursor: "pointer", color: C.text, width: "100%" }}
           >
             <div style={{ fontSize: 26 }}>🎟️</div>
-            <div style={{ fontFamily: "'Unbounded', sans-serif", fontWeight: 700, fontSize: 16, margin: "8px 0 4px" }}>
-              J'ai reçu un lien
-            </div>
-            <div style={{ color: C.muted, fontSize: 13.5 }}>Ouvrir un événement et acheter mon billet</div>
+            <div style={{ fontFamily: "'Unbounded', sans-serif", fontWeight: 700, fontSize: 16, margin: "8px 0 4px" }}>Je suis client</div>
+            <div style={{ color: C.muted, fontSize: 13.5 }}>Ouvrir un événement et retrouver mes billets</div>
           </button>
         </Reveal>
-
-        {myTickets.length > 0 && (
-          <Reveal i={3}>
-            <button onClick={() => setView("kTickets")} className="tk-press" style={S.btnGhost}>
-              Mes billets ({myTickets.length})
-            </button>
-          </Reveal>
-        )}
       </div>
     </div>
   );
 }
 
-/* ============================ Organisateur ============================ */
-function CreatorAuth({ onBack, onDone }) {
+/* ============================ Connexion / Création de compte ============================ */
+function Auth({ role, onBack, onDone }) {
+  const [mode, setMode] = useState("login");
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
   const [name, setName] = useState("");
   const [phone, setPhone] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+
+  const title = role === "organizer" ? "Compte organisateur" : "Compte client";
+  const phoneLabel = role === "organizer" ? "Numéro mobile money (encaissements)" : "Numéro de téléphone";
+
+  const ok = mode === "login" ? email && password : email && password.length >= 6 && name && phone;
+
+  const submit = async () => {
+    if (!ok || busy) return;
+    setErr("");
+    setBusy(true);
+    try {
+      const profile = mode === "signup" ? await signUp({ email, password, role, name, phone }) : await signIn({ email, password });
+      onDone(profile);
+    } catch (e) {
+      setErr(e.message || "Une erreur est survenue.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
   return (
     <div>
-      <Top title="Compte organisateur" onBack={onBack} />
+      <Top title={title} onBack={onBack} />
       <Reveal i={0}>
-        <div style={S.card}>
-          <label style={S.label}>Nom ou nom de scène</label>
-          <input style={S.input} value={name} onChange={(e) => setName(e.target.value)} placeholder="Ex. DJ Maleka Events" />
-          <label style={S.label}>Numéro mobile money (encaissements)</label>
-          <input style={S.input} value={phone} onChange={(e) => setPhone(e.target.value)} placeholder="06 XXX XX XX" inputMode="tel" />
-          <button
-            className="tk-press"
-            style={{ ...S.btn, opacity: name && phone ? 1 : 0.4 }}
-            disabled={!name || !phone}
-            onClick={() => onDone({ id: "c-" + genCode(8), name, phone })}
-          >
-            Continuer
-          </button>
-          <div style={{ color: C.muted, fontSize: 12.5, marginTop: 12, lineHeight: 1.5 }}>
-            Les fonds des ventes sont reversés sur ce numéro. Tu ne verras que tes propres événements.
+        <div style={{ ...S.card, animation: err ? "tk-shake .4s both" : "none" }}>
+          <div style={{ display: "flex", gap: 8, marginBottom: 16 }}>
+            {[
+              { id: "login", label: "Se connecter" },
+              { id: "signup", label: "Créer un compte" },
+            ].map((m) => (
+              <button
+                key={m.id}
+                onClick={() => {
+                  setMode(m.id);
+                  setErr("");
+                }}
+                className="tk-press"
+                style={{
+                  flex: 1,
+                  padding: "10px",
+                  borderRadius: 10,
+                  border: `1px solid ${C.line}`,
+                  background: mode === m.id ? C.amber : C.surface2,
+                  color: mode === m.id ? C.amberDark : C.text,
+                  fontWeight: 700,
+                  fontSize: 13.5,
+                  cursor: "pointer",
+                  fontFamily: "'Space Grotesk', sans-serif",
+                }}
+              >
+                {m.label}
+              </button>
+            ))}
           </div>
+
+          {mode === "signup" && (
+            <>
+              <label style={S.label}>{role === "organizer" ? "Nom ou nom de scène" : "Nom complet"}</label>
+              <input
+                style={S.input}
+                value={name}
+                onChange={(e) => setName(e.target.value)}
+                placeholder={role === "organizer" ? "Ex. DJ Maleka Events" : "Ex. Nadège Loemba"}
+              />
+              <label style={S.label}>{phoneLabel}</label>
+              <input style={S.input} value={phone} onChange={(e) => setPhone(e.target.value)} placeholder="06 XXX XX XX" inputMode="tel" />
+            </>
+          )}
+
+          <label style={S.label}>Email</label>
+          <input style={S.input} type="email" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="toi@email.com" />
+          <label style={S.label}>Mot de passe</label>
+          <input
+            style={S.input}
+            type="password"
+            value={password}
+            onChange={(e) => setPassword(e.target.value)}
+            placeholder={mode === "signup" ? "6 caractères minimum" : "••••••••"}
+            onKeyDown={(e) => e.key === "Enter" && submit()}
+          />
+
+          {err && <div style={{ color: C.pink, fontSize: 13, marginBottom: 12 }}>{err}</div>}
+
+          <button className="tk-press" style={{ ...S.btn, opacity: ok && !busy ? 1 : 0.4 }} disabled={!ok || busy} onClick={submit}>
+            {busy ? "Un instant…" : mode === "signup" ? "Créer mon compte" : "Se connecter"}
+          </button>
+
+          {role === "organizer" && mode === "signup" && (
+            <div style={{ color: C.muted, fontSize: 12.5, marginTop: 12, lineHeight: 1.5 }}>
+              Les fonds des ventes sont reversés sur ce numéro. Tu ne verras que tes propres événements.
+            </div>
+          )}
         </div>
       </Reveal>
     </div>
   );
 }
 
-/* ---------- TABLEAU DE BORD GLOBAL ---------- */
-function CreatorDash({ creator, events, onBack, onNew, onOpen }) {
-  const mine = Object.values(events)
-    .filter((e) => e.creatorId === creator.id)
-    .sort((a, b) => b.ts - a.ts);
+/* ---------- TABLEAU DE BORD GLOBAL (ORGANISATEUR) ---------- */
+function CreatorDash({ profile, events, onLogout, onNew, onOpen }) {
+  const mine = Object.values(events).sort((a, b) => b.ts - a.ts);
 
   const allBuyers = mine.flatMap((e) => e.buyers.map((b) => ({ ...b, eventName: e.name, eventCode: e.code })));
   const totalRevenue = mine.reduce((s, e) => s + revenue(e), 0);
@@ -731,7 +925,7 @@ function CreatorDash({ creator, events, onBack, onNew, onOpen }) {
 
   return (
     <div>
-      <Top title={`Salut, ${creator.name}`} onBack={onBack} />
+      <Top title={`Salut, ${profile.name}`} right={<LogoutButton onClick={onLogout} />} />
 
       {/* Bloc revenus principal */}
       <Reveal i={0}>
@@ -902,7 +1096,7 @@ function CreatorDash({ creator, events, onBack, onNew, onOpen }) {
 }
 
 /* ---------- Création avec catégories de prix ---------- */
-function NewEvent({ creator, onBack, onCreate }) {
+function NewEvent({ profile, onBack, onCreate }) {
   const [f, setF] = useState({ name: "", date: "", time: "", venue: "", city: "Pointe-Noire", desc: "" });
   const [tiers, setTiers] = useState([{ id: "t1", name: "Standard", price: "", capacity: "" }]);
   const set = (k) => (e) => setF({ ...f, [k]: e.target.value });
@@ -1033,8 +1227,8 @@ function NewEvent({ creator, onBack, onCreate }) {
           onClick={() =>
             onCreate({
               code: genCode(6),
-              creatorId: creator.id,
-              momoNumber: creator.phone,
+              creatorId: profile.id,
+              momoNumber: profile.phone,
               name: f.name,
               date: f.date,
               time: f.time,
@@ -1044,6 +1238,7 @@ function NewEvent({ creator, onBack, onCreate }) {
               tiers: tiers.map((t) => ({ id: t.id, name: t.name.trim(), price: Number(t.price), capacity: Number(t.capacity) })),
               buyers: [],
               used: {},
+              withdrawals: [],
               ts: Date.now(),
             })
           }
@@ -1056,7 +1251,8 @@ function NewEvent({ creator, onBack, onCreate }) {
 }
 
 /* ---------- TABLEAU DE BORD ÉVÉNEMENT ---------- */
-function CreatorEvent({ ev, onBack, onScan, notify }) {
+function CreatorEvent({ ev, onBack, onScan, notify, onWithdraw }) {
+  const [withdrawing, setWithdrawing] = useState(false);
   const link = `https://tike.app/e/${ev.code}`;
   const rev = revenue(ev);
   const sold = totalSold(ev);
@@ -1066,7 +1262,8 @@ function CreatorEvent({ ev, onBack, onScan, notify }) {
   const scanPct = sold ? (usedCount / sold) * 100 : 0;
   const revAnim = useCountUp(rev);
   const avgBasket = ev.buyers.length ? rev / ev.buyers.length : 0;
-  const commission = rev * 0.05;
+  const withdrawn = withdrawnTotal(ev);
+  const available = availableFunds(ev);
 
   const eventDate = new Date(ev.date + "T" + (ev.time || "00:00"));
   const daysLeft = Math.ceil((eventDate - new Date()) / 86400000);
@@ -1079,6 +1276,14 @@ function CreatorEvent({ ev, onBack, onScan, notify }) {
       notify(`Lien : ${link}`);
     }
   };
+
+  const doWithdraw = async () => {
+    if (available <= 0 || withdrawing) return;
+    setWithdrawing(true);
+    await onWithdraw(available);
+    setWithdrawing(false);
+  };
+
   const priceLine = ev.tiers.map((t) => `${t.name} ${fmtFCFA(t.price)}`).join(" · ");
   const waText = encodeURIComponent(
     `🎟️ ${ev.name}\n📅 ${ev.date} à ${ev.time}\n📍 ${ev.venue}, ${ev.city}\n💵 ${priceLine}\n\nAchète ton billet ici : ${link}`
@@ -1124,7 +1329,7 @@ function CreatorEvent({ ev, onBack, onScan, notify }) {
           {[
             { k: "Panier moyen", v: fmtShort(avgBasket), c: C.text },
             { k: "Commandes", v: ev.buyers.length, c: C.blue },
-            { k: "Net à recevoir", v: fmtShort(rev - commission), c: C.green },
+            { k: "Disponible", v: fmtShort(available), c: C.green },
           ].map((x) => (
             <div key={x.k} style={{ ...S.card, padding: 14, textAlign: "center" }}>
               <div style={{ fontFamily: "'Unbounded', sans-serif", fontWeight: 700, fontSize: 17, color: x.c }}>{x.v}</div>
@@ -1136,8 +1341,33 @@ function CreatorEvent({ ev, onBack, onScan, notify }) {
         </div>
       </Reveal>
 
-      {/* Lien de partage */}
+      {/* Retrait de fonds */}
       <Reveal i={2}>
+        <div style={{ ...S.card, marginBottom: 14 }}>
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12 }}>
+            <div>
+              <div style={S.label}>Fonds disponibles</div>
+              <div style={{ fontFamily: "'Unbounded', sans-serif", fontWeight: 900, fontSize: 22, color: C.green }}>
+                {fmtFCFA(available)}
+              </div>
+            </div>
+            <button
+              className="tk-press"
+              style={{ ...S.btn, width: "auto", padding: "13px 20px", opacity: available > 0 && !withdrawing ? 1 : 0.4 }}
+              disabled={available <= 0 || withdrawing}
+              onClick={doWithdraw}
+            >
+              {withdrawing ? "…" : "Retirer"}
+            </button>
+          </div>
+          {withdrawn > 0 && (
+            <div style={{ color: C.muted, fontSize: 12, marginTop: 10 }}>{fmtFCFA(withdrawn)} déjà retirés sur cet événement.</div>
+          )}
+        </div>
+      </Reveal>
+
+      {/* Lien de partage */}
+      <Reveal i={3}>
         <div style={{ ...S.card, marginBottom: 14 }}>
           <div style={S.label}>Ton lien de vente</div>
           <div
@@ -1176,7 +1406,7 @@ function CreatorEvent({ ev, onBack, onScan, notify }) {
       </Reveal>
 
       {/* Contrôle d'entrée */}
-      <Reveal i={3}>
+      <Reveal i={4}>
         <button
           onClick={onScan}
           className="tk-press"
@@ -1188,7 +1418,7 @@ function CreatorEvent({ ev, onBack, onScan, notify }) {
 
       {/* Courbe des ventes */}
       {ev.buyers.length > 0 && (
-        <Reveal i={4}>
+        <Reveal i={5}>
           <div style={{ ...S.card, marginBottom: 14 }}>
             <div style={{ ...S.label, marginBottom: 14 }}>Ventes — 7 derniers jours</div>
             <SalesChart buyers={ev.buyers} />
@@ -1197,7 +1427,7 @@ function CreatorEvent({ ev, onBack, onScan, notify }) {
       )}
 
       {/* Répartition par catégorie */}
-      <Reveal i={5}>
+      <Reveal i={6}>
         <div style={{ ...S.card, marginBottom: 14 }}>
           <div style={{ ...S.label, marginBottom: 12 }}>Répartition par catégorie</div>
           <TierSplit ev={ev} />
@@ -1205,7 +1435,7 @@ function CreatorEvent({ ev, onBack, onScan, notify }) {
       </Reveal>
 
       {/* Acheteurs */}
-      <Reveal i={6}>
+      <Reveal i={7}>
         <div style={S.card}>
           <div style={S.label}>Acheteurs ({ev.buyers.length})</div>
           {ev.buyers.length === 0 ? (
@@ -1423,24 +1653,69 @@ function Scanner({ ev, onBack, onMarkUsed }) {
   );
 }
 
-/* ============================ Client ============================ */
-function ClientAccess({ events, onBack, onFound }) {
+/* ============================ TABLEAU DE BORD CLIENT ============================ */
+function ClientDash({ profile, events, onLogout, onOpenEvent, onOpenedNew, notify }) {
   const [code, setCode] = useState("");
   const [err, setErr] = useState("");
-  const tryOpen = () => {
+  const [busy, setBusy] = useState(false);
+
+  const list = Object.values(events).sort((a, b) => b.ts - a.ts);
+  const now = new Date();
+
+  const allTickets = [];
+  for (const e of list) {
+    for (const b of e.buyers) {
+      for (const id of b.ids) {
+        allTickets.push({
+          id,
+          eventCode: e.code,
+          eventName: e.name,
+          date: e.date,
+          time: e.time,
+          venue: e.venue,
+          city: e.city,
+          tierName: b.tierName,
+          buyerName: b.name,
+          ts: b.ts,
+          eventDate: new Date(e.date + "T" + (e.time || "00:00")),
+        });
+      }
+    }
+  }
+  allTickets.sort((a, b) => b.ts - a.ts);
+  const active = allTickets.filter((t) => t.eventDate >= now);
+  const history = allTickets.filter((t) => t.eventDate < now);
+
+  const openByCode = async () => {
     const clean = code.trim().toUpperCase().replace(/^HTTPS?:\/\/TIKE\.APP\/E\//, "");
-    if (events[clean]) onFound(clean);
-    else setErr("Aucun événement trouvé avec ce lien ou ce code. Vérifie auprès de l'organisateur.");
+    if (!clean || busy) return;
+    setErr("");
+    setBusy(true);
+    try {
+      const found = await openEventByCode(clean);
+      if (!found) {
+        setErr("Aucun événement trouvé avec ce lien ou ce code.");
+        return;
+      }
+      await recordEventAccess(profile.id, clean);
+      onOpenedNew(clean, found);
+      setCode("");
+      onOpenEvent(clean);
+    } catch (e) {
+      console.error(e);
+      notify("Erreur réseau — réessaie.");
+    } finally {
+      setBusy(false);
+    }
   };
+
   return (
     <div>
-      <Top title="Ouvrir un événement" onBack={onBack} />
+      <Top title={`Salut, ${profile.name}`} right={<LogoutButton onClick={onLogout} />} />
+
       <Reveal i={0}>
-        <div style={{ ...S.card, animation: err ? "tk-shake .4s both" : "none" }}>
-          <div style={{ color: C.muted, fontSize: 14, marginBottom: 14, lineHeight: 1.5 }}>
-            Colle le lien reçu (WhatsApp, Facebook…) ou saisis le code de l'événement.
-          </div>
-          <label style={S.label}>Lien ou code</label>
+        <div style={{ ...S.card, animation: err ? "tk-shake .4s both" : "none", marginBottom: 20 }}>
+          <div style={S.label}>Ouvrir un événement</div>
           <input
             style={S.input}
             value={code}
@@ -1449,18 +1724,74 @@ function ClientAccess({ events, onBack, onFound }) {
               setErr("");
             }}
             placeholder="https://tike.app/e/ABC123 ou ABC123"
-            onKeyDown={(e) => e.key === "Enter" && tryOpen()}
+            onKeyDown={(e) => e.key === "Enter" && openByCode()}
           />
           {err && <div style={{ color: C.pink, fontSize: 13, marginBottom: 12 }}>{err}</div>}
-          <button className="tk-press" style={S.btn} onClick={tryOpen}>
-            Ouvrir l'événement
+          <button className="tk-press" style={{ ...S.btn, opacity: code.trim() && !busy ? 1 : 0.4 }} disabled={!code.trim() || busy} onClick={openByCode}>
+            {busy ? "Recherche…" : "Ouvrir"}
           </button>
         </div>
       </Reveal>
+
+      {active.length > 0 && (
+        <div style={{ marginBottom: 20 }}>
+          <div style={{ ...S.label, marginBottom: 12 }}>Billets actifs ({active.length})</div>
+          <div style={{ display: "grid", gap: 14 }}>
+            {active.map((t, i) => (
+              <TicketCard key={t.id} t={t} i={i} />
+            ))}
+          </div>
+        </div>
+      )}
+
+      {list.length > 0 ? (
+        <div style={{ marginBottom: 20 }}>
+          <div style={{ ...S.label, marginBottom: 12 }}>Mes événements</div>
+          <div style={{ display: "grid", gap: 12 }}>
+            {list.map((e, i) => (
+              <Reveal key={e.code} i={i}>
+                <button
+                  onClick={() => onOpenEvent(e.code)}
+                  className="tk-press tk-lift"
+                  style={{ ...S.card, textAlign: "left", cursor: "pointer", color: C.text, width: "100%" }}
+                >
+                  <div style={{ display: "flex", justifyContent: "space-between", gap: 10 }}>
+                    <div style={{ fontWeight: 700, fontSize: 15 }}>{e.name}</div>
+                    <div style={{ color: e.buyers.length ? C.green : C.muted, fontWeight: 700, fontSize: 12, whiteSpace: "nowrap" }}>
+                      {e.buyers.length ? "Billet acheté" : "Pas encore acheté"}
+                    </div>
+                  </div>
+                  <div style={{ color: C.muted, fontSize: 13, marginTop: 4 }}>
+                    {e.date} · {e.venue}, {e.city}
+                  </div>
+                </button>
+              </Reveal>
+            ))}
+          </div>
+        </div>
+      ) : (
+        <Reveal i={1}>
+          <div style={{ ...S.card, textAlign: "center", color: C.muted, fontSize: 14 }}>
+            Aucun événement pour l'instant. Ouvre le lien reçu d'un organisateur pour commencer.
+          </div>
+        </Reveal>
+      )}
+
+      {history.length > 0 && (
+        <div>
+          <div style={{ ...S.label, marginBottom: 12 }}>Historique</div>
+          <div style={{ display: "grid", gap: 14 }}>
+            {history.map((t, i) => (
+              <TicketCard key={t.id} t={t} i={i} muted />
+            ))}
+          </div>
+        </div>
+      )}
     </div>
   );
 }
 
+/* ============================ Détail événement (client) ============================ */
 function ClientEvent({ ev, onBack, onBuy }) {
   const d = ev.date ? new Date(ev.date + "T" + (ev.time || "00:00")) : null;
   const dateStr = d ? d.toLocaleDateString("fr-FR", { weekday: "long", day: "numeric", month: "long", year: "numeric" }) : ev.date;
@@ -1525,10 +1856,10 @@ function ClientEvent({ ev, onBack, onBuy }) {
 }
 
 /* ============================ Paiement MoMo ============================ */
-function Payment({ ev, onBack, onPaid }) {
+function Payment({ ev, profile, onBack, onPaid }) {
   const [step, setStep] = useState(1);
-  const [name, setName] = useState("");
-  const [phone, setPhone] = useState("");
+  const [name, setName] = useState(profile.name || "");
+  const [phone, setPhone] = useState(profile.phone || "");
   const [qty, setQty] = useState(1);
   const [op, setOp] = useState(null);
   const [tierId, setTierId] = useState(null);
@@ -1699,95 +2030,6 @@ function Payment({ ev, onBack, onPaid }) {
           />
           <div style={{ fontWeight: 700, fontSize: 16 }}>Vérification du paiement…</div>
           <div style={{ color: C.muted, fontSize: 13.5, marginTop: 8 }}>Ne ferme pas cette page.</div>
-        </div>
-      )}
-    </div>
-  );
-}
-
-/* ============================ Mes billets ============================ */
-function MyTickets({ tickets, onBack }) {
-  const sorted = tickets.slice().sort((a, b) => b.ts - a.ts);
-  return (
-    <div>
-      <Top title="Mes billets" onBack={onBack} />
-      {sorted.length === 0 ? (
-        <Reveal i={0}>
-          <div style={{ ...S.card, textAlign: "center", color: C.muted }}>Aucun billet. Ouvre un lien d'événement pour en acheter.</div>
-        </Reveal>
-      ) : (
-        <div style={{ display: "grid", gap: 16 }}>
-          {sorted.map((t, idx) => (
-            <Reveal key={t.id} i={idx}>
-              <div className="tk-lift" style={{ ...S.card, padding: 0, overflow: "hidden" }}>
-                <div style={{ padding: "18px 20px 16px" }}>
-                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-                    <div style={{ fontSize: 11, letterSpacing: 2, textTransform: "uppercase", color: C.amber, fontWeight: 700 }}>
-                      Billet valide
-                    </div>
-                    <div
-                      style={{
-                        fontSize: 11,
-                        fontWeight: 700,
-                        background: "rgba(255,181,37,.14)",
-                        border: `1px solid ${C.amber}`,
-                        color: C.amber,
-                        borderRadius: 999,
-                        padding: "4px 10px",
-                        letterSpacing: 1,
-                        textTransform: "uppercase",
-                      }}
-                    >
-                      {t.tierName}
-                    </div>
-                  </div>
-                  <div style={{ fontFamily: "'Unbounded', sans-serif", fontWeight: 700, fontSize: 17, margin: "8px 0 6px" }}>
-                    {t.eventName}
-                  </div>
-                  <div style={{ color: C.muted, fontSize: 13.5, lineHeight: 1.6 }}>
-                    {t.date} à {t.time} · {t.venue}, {t.city}
-                    <br />
-                    Titulaire : <b style={{ color: C.text }}>{t.buyerName}</b>
-                  </div>
-                </div>
-                <Perf />
-                <div style={{ padding: "16px 20px 18px", display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12 }}>
-                  <div>
-                    <div style={{ fontSize: 11, color: C.muted, letterSpacing: 1, textTransform: "uppercase", fontWeight: 700 }}>
-                      Code d'entrée
-                    </div>
-                    <div style={{ fontFamily: "'Unbounded', sans-serif", fontWeight: 700, fontSize: 15, color: C.amber, marginTop: 4 }}>
-                      {t.id}
-                    </div>
-                  </div>
-                  <div
-                    aria-hidden
-                    style={{
-                      width: 62,
-                      height: 62,
-                      background: C.text,
-                      borderRadius: 8,
-                      padding: 6,
-                      display: "grid",
-                      gridTemplateColumns: "repeat(6, 1fr)",
-                      gap: 2,
-                      boxSizing: "border-box",
-                    }}
-                  >
-                    {Array.from({ length: 36 }).map((_, i) => (
-                      <div
-                        key={i}
-                        style={{
-                          background: (t.id.charCodeAt(i % t.id.length) + i) % 3 === 0 ? C.bg : "transparent",
-                          borderRadius: 1,
-                        }}
-                      />
-                    ))}
-                  </div>
-                </div>
-              </div>
-            </Reveal>
-          ))}
         </div>
       )}
     </div>
