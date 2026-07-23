@@ -11,6 +11,7 @@ function rowToEvent(row) {
     venue: row.venue,
     city: row.city,
     desc: row.description,
+    posterUrl: row.poster_url,
     tiers: row.tiers || [],
     used: row.used || {},
     ts: row.ts,
@@ -77,11 +78,21 @@ export async function createEventDB(ev) {
     venue: ev.venue,
     city: ev.city,
     description: ev.desc,
+    poster_url: ev.posterUrl,
     tiers: ev.tiers,
     used: ev.used,
     ts: ev.ts,
   });
   if (error) throw error;
+}
+
+export async function uploadPosterDB(userId, code, file) {
+  const ext = (file.name.split(".").pop() || "jpg").toLowerCase();
+  const path = `${userId}/${code}.${ext}`;
+  const { error } = await supabase.storage.from("posters").upload(path, file, { upsert: true, contentType: file.type });
+  if (error) throw error;
+  const { data } = supabase.storage.from("posters").getPublicUrl(path);
+  return data.publicUrl;
 }
 
 export async function markTicketUsedDB(eventCode, ticketId, ts) {

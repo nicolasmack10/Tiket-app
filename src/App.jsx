@@ -3,6 +3,7 @@ import {
   fetchOrganizerEvents,
   fetchClientEvents,
   createEventDB,
+  uploadPosterDB,
   addBuyerDB,
   markTicketUsedDB,
   withdrawFundsDB,
@@ -84,6 +85,11 @@ const genCode = (len = 6) => {
   let s = "";
   for (let i = 0; i < len; i++) s += chars[Math.floor(Math.random() * chars.length)];
   return s;
+};
+
+const codeFromPath = () => {
+  const m = window.location.pathname.match(/^\/e\/([A-Za-z0-9]+)/);
+  return m ? m[1].toUpperCase() : null;
 };
 
 const tierSold = (ev, tierId) => ev.buyers.filter((b) => b.tierId === tierId).reduce((s, b) => s + b.qty, 0);
@@ -512,8 +518,32 @@ export default function TikeApp() {
     }
   }, []);
 
+  // Ouvre l'événement pointé par un lien /e/CODE partagé, et l'ajoute aux
+  // événements du client connecté pour qu'il le retrouve la prochaine fois.
+  const openSharedEvent = useCallback(async (userId, code) => {
+    try {
+      const found = await openEventByCode(code);
+      if (!found) {
+        notify("Lien invalide ou événement introuvable.");
+        return false;
+      }
+      await recordEventAccess(userId, code);
+      setEvents((prev) => ({ ...prev, [code]: found }));
+      setActiveCode(code);
+      setView("kEvent");
+      return true;
+    } catch (e) {
+      console.error(e);
+      notify("Impossible d'ouvrir cet événement.");
+      return false;
+    }
+  }, []); // eslint-disable-line
+
+  const pendingCode = useRef(codeFromPath());
+
   useEffect(() => {
     (async () => {
+      if (pendingCode.current) window.history.replaceState({}, "", "/");
       const p = await getSessionProfile();
       if (p) {
         setProfile(p);
@@ -522,8 +552,13 @@ export default function TikeApp() {
           setView("cDash");
         } else {
           await loadClientEvents(p.id);
-          setView("clientDash");
+          const code = pendingCode.current;
+          pendingCode.current = null;
+          if (!code || !(await openSharedEvent(p.id, code))) setView("clientDash");
         }
+      } else if (pendingCode.current) {
+        setPendingRole("client");
+        setView("auth");
       }
       setLoading(false);
     })();
@@ -536,7 +571,9 @@ export default function TikeApp() {
       setView("cDash");
     } else {
       await loadClientEvents(p.id);
-      setView("clientDash");
+      const code = pendingCode.current;
+      pendingCode.current = null;
+      if (!code || !(await openSharedEvent(p.id, code))) setView("clientDash");
     }
   };
 
@@ -1099,7 +1136,28 @@ function CreatorDash({ profile, events, onLogout, onNew, onOpen }) {
 function NewEvent({ profile, onBack, onCreate }) {
   const [f, setF] = useState({ name: "", date: "", time: "", venue: "", city: "Pointe-Noire", desc: "" });
   const [tiers, setTiers] = useState([{ id: "t1", name: "Standard", price: "", capacity: "" }]);
+  const [posterFile, setPosterFile] = useState(null);
+  const [posterPreview, setPosterPreview] = useState(null);
+  const [posterErr, setPosterErr] = useState("");
+  const [creating, setCreating] = useState(false);
   const set = (k) => (e) => setF({ ...f, [k]: e.target.value });
+
+  const onPosterChange = (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    if (!file.type.startsWith("image/")) {
+      setPosterErr("Choisis un fichier image.");
+      return;
+    }
+    if (file.size > 5 * 1024 * 1024) {
+      setPosterErr("Image trop lourde (5 Mo max).");
+      return;
+    }
+    setPosterErr("");
+    setPosterFile(file);
+    setPosterPreview(URL.createObjectURL(file));
+  };
+
   const setTier = (i, k, v) => {
     const next = tiers.slice();
     next[i] = { ...next[i], [k]: v };
@@ -1113,7 +1171,40 @@ function NewEvent({ profile, onBack, onCreate }) {
   const removeTier = (i) => setTiers(tiers.filter((_, j) => j !== i));
 
   const tiersOk = tiers.length > 0 && tiers.every((t) => t.name.trim() && Number(t.price) > 0 && Number(t.capacity) > 0);
-  const ok = f.name && f.date && f.time && f.venue && tiersOk;
+  const ok = f.name && f.date && f.time && f.venue && tiersOk && posterFile;
+
+  const handleCreate = async () => {
+    if (!ok || creating) return;
+    setCreating(true);
+    const code = genCode(6);
+    let posterUrl;
+    try {
+      posterUrl = await uploadPosterDB(profile.id, code, posterFile);
+    } catch (err) {
+      console.error(err);
+      setPosterErr("Échec de l'envoi de l'affiche — réessaie.");
+      setCreating(false);
+      return;
+    }
+    await onCreate({
+      code,
+      creatorId: profile.id,
+      momoNumber: profile.phone,
+      name: f.name,
+      date: f.date,
+      time: f.time,
+      venue: f.venue,
+      city: f.city,
+      desc: f.desc,
+      posterUrl,
+      tiers: tiers.map((t) => ({ id: t.id, name: t.name.trim(), price: Number(t.price), capacity: Number(t.capacity) })),
+      buyers: [],
+      used: {},
+      withdrawals: [],
+      ts: Date.now(),
+    });
+    setCreating(false);
+  };
 
   return (
     <div>
@@ -1147,6 +1238,37 @@ function NewEvent({ profile, onBack, onCreate }) {
       </Reveal>
 
       <Reveal i={1}>
+        <div style={{ ...S.card, marginBottom: 16 }}>
+          <label style={S.label}>Affiche de l'événement</label>
+          <div style={{ color: C.muted, fontSize: 12.5, marginBottom: 12, lineHeight: 1.5 }}>
+            Visible en en-tête de la page que verront tes invités.
+          </div>
+          {posterPreview && (
+            <img
+              src={posterPreview}
+              alt=""
+              style={{ width: "100%", maxHeight: 220, objectFit: "cover", borderRadius: 12, marginBottom: 12, display: "block" }}
+            />
+          )}
+          <label
+            className="tk-press"
+            style={{
+              ...S.btnGhost,
+              display: "block",
+              textAlign: "center",
+              boxSizing: "border-box",
+              marginBottom: 0,
+              cursor: "pointer",
+            }}
+          >
+            {posterFile ? "Changer l'affiche" : "Choisir une image"}
+            <input type="file" accept="image/*" onChange={onPosterChange} style={{ display: "none" }} />
+          </label>
+          {posterErr && <div style={{ color: C.pink, fontSize: 13, marginTop: 10 }}>{posterErr}</div>}
+        </div>
+      </Reveal>
+
+      <Reveal i={2}>
         <div style={{ ...S.card, marginBottom: 16 }}>
           <div style={{ ...S.label, marginBottom: 12 }}>Catégories de billets</div>
           {tiers.map((t, i) => (
@@ -1219,31 +1341,9 @@ function NewEvent({ profile, onBack, onCreate }) {
         </div>
       </Reveal>
 
-      <Reveal i={2}>
-        <button
-          className="tk-press"
-          style={{ ...S.btn, opacity: ok ? 1 : 0.4 }}
-          disabled={!ok}
-          onClick={() =>
-            onCreate({
-              code: genCode(6),
-              creatorId: profile.id,
-              momoNumber: profile.phone,
-              name: f.name,
-              date: f.date,
-              time: f.time,
-              venue: f.venue,
-              city: f.city,
-              desc: f.desc,
-              tiers: tiers.map((t) => ({ id: t.id, name: t.name.trim(), price: Number(t.price), capacity: Number(t.capacity) })),
-              buyers: [],
-              used: {},
-              withdrawals: [],
-              ts: Date.now(),
-            })
-          }
-        >
-          Créer et obtenir mon lien
+      <Reveal i={3}>
+        <button className="tk-press" style={{ ...S.btn, opacity: ok && !creating ? 1 : 0.4 }} disabled={!ok || creating} onClick={handleCreate}>
+          {creating ? "Création…" : "Créer et obtenir mon lien"}
         </button>
       </Reveal>
     </div>
@@ -1253,7 +1353,7 @@ function NewEvent({ profile, onBack, onCreate }) {
 /* ---------- TABLEAU DE BORD ÉVÉNEMENT ---------- */
 function CreatorEvent({ ev, onBack, onScan, notify, onWithdraw }) {
   const [withdrawing, setWithdrawing] = useState(false);
-  const link = `https://tike.app/e/${ev.code}`;
+  const link = `${window.location.origin}/e/${ev.code}`;
   const rev = revenue(ev);
   const sold = totalSold(ev);
   const cap = totalCap(ev);
@@ -1292,6 +1392,16 @@ function CreatorEvent({ ev, onBack, onScan, notify, onWithdraw }) {
   return (
     <div>
       <Top title={ev.name} onBack={onBack} />
+
+      {ev.posterUrl && (
+        <Reveal i={0}>
+          <img
+            src={ev.posterUrl}
+            alt=""
+            style={{ width: "100%", display: "block", maxHeight: 200, objectFit: "cover", borderRadius: 18, marginBottom: 14 }}
+          />
+        </Reveal>
+      )}
 
       {/* Bandeau principal */}
       <Reveal i={0}>
@@ -1802,6 +1912,7 @@ function ClientEvent({ ev, onBack, onBuy }) {
       <Top title="Événement" onBack={onBack} />
       <Reveal i={0}>
         <div style={{ ...S.card, padding: 0, overflow: "hidden" }}>
+          {ev.posterUrl && <img src={ev.posterUrl} alt="" style={{ width: "100%", display: "block", aspectRatio: "4 / 5", objectFit: "cover" }} />}
           <div style={{ background: `linear-gradient(135deg, ${C.surface2}, #3A2E6E)`, padding: "26px 20px 22px" }}>
             <div style={{ fontSize: 12, letterSpacing: 2, textTransform: "uppercase", color: C.amber, fontWeight: 700 }}>Invitation</div>
             <div style={{ fontFamily: "'Unbounded', sans-serif", fontWeight: 900, fontSize: 24, lineHeight: 1.15, margin: "8px 0 10px" }}>
