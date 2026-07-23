@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useCallback, useRef } from "react";
+import { fetchEvents, createEventDB, addBuyerDB, markTicketUsedDB } from "./lib/db";
 
 /* ============================================================
    TIKÉ v3 — Billetterie par lien, paiement mobile money
@@ -78,20 +79,18 @@ const totalSold = (ev) => ev.buyers.reduce((s, b) => s + b.qty, 0);
 const totalCap = (ev) => ev.tiers.reduce((s, t) => s + t.capacity, 0);
 const revenue = (ev) => ev.buyers.reduce((s, b) => s + b.qty * b.unitPrice, 0);
 
-/* ---------- Stockage persistant avec repli mémoire ---------- */
-const mem = {};
-async function stGet(key, shared = false) {
+/* ---------- Stockage local (par appareil) ---------- */
+function lsGet(key, fallback) {
   try {
-    const r = await window.storage.get(key, shared);
-    return r ? JSON.parse(r.value) : null;
+    const raw = localStorage.getItem(key);
+    return raw ? JSON.parse(raw) : fallback;
   } catch {
-    return mem[key] ?? null;
+    return fallback;
   }
 }
-async function stSet(key, value, shared = false) {
-  mem[key] = value;
+function lsSet(key, value) {
   try {
-    await window.storage.set(key, JSON.stringify(value), shared);
+    localStorage.setItem(key, JSON.stringify(value));
   } catch {}
 }
 
@@ -407,26 +406,23 @@ export default function TikeApp() {
 
   useEffect(() => {
     (async () => {
-      const [c, ev, tk] = await Promise.all([
-        stGet("tike:creator"),
-        stGet("tike:events:v2", true),
-        stGet("tike:mytickets:v2"),
-      ]);
+      const c = lsGet("tike:creator", null);
+      const tk = lsGet("tike:mytickets:v2", []);
       if (c) setCreator(c);
-      if (ev) setEvents(ev);
       if (tk) setMyTickets(tk);
+      try {
+        setEvents(await fetchEvents());
+      } catch (e) {
+        console.error("Échec du chargement des événements", e);
+        notify("Impossible de charger les événements — vérifie ta connexion.");
+      }
       setLoading(false);
     })();
   }, []);
 
-  const saveEvents = useCallback(async (next) => {
-    setEvents(next);
-    await stSet("tike:events:v2", next, true);
-  }, []);
-
-  const saveTickets = useCallback(async (next) => {
+  const saveTickets = useCallback((next) => {
     setMyTickets(next);
-    await stSet("tike:mytickets:v2", next);
+    lsSet("tike:mytickets:v2", next);
   }, []);
 
   const ev = activeCode ? events[activeCode] : null;
@@ -465,9 +461,9 @@ export default function TikeApp() {
             {view === "cAuth" && (
               <CreatorAuth
                 onBack={() => setView("home")}
-                onDone={async (c) => {
+                onDone={(c) => {
                   setCreator(c);
-                  await stSet("tike:creator", c);
+                  lsSet("tike:creator", c);
                   setView("cDash");
                 }}
               />
@@ -489,7 +485,14 @@ export default function TikeApp() {
                 creator={creator}
                 onBack={() => setView("cDash")}
                 onCreate={async (e) => {
-                  await saveEvents({ ...events, [e.code]: e });
+                  try {
+                    await createEventDB(e);
+                  } catch (err) {
+                    console.error(err);
+                    notify("Échec de la création — réessaie.");
+                    return;
+                  }
+                  setEvents((prev) => ({ ...prev, [e.code]: e }));
                   setActiveCode(e.code);
                   setView("cEvent");
                   notify("Événement créé — partage ton lien !");
@@ -504,8 +507,18 @@ export default function TikeApp() {
                 ev={ev}
                 onBack={() => setView("cEvent")}
                 onMarkUsed={async (ticketId) => {
-                  const updated = { ...ev, used: { ...(ev.used || {}), [ticketId]: Date.now() } };
-                  await saveEvents({ ...events, [ev.code]: updated });
+                  const ts = Date.now();
+                  try {
+                    await markTicketUsedDB(ev.code, ticketId, ts);
+                  } catch (err) {
+                    console.error(err);
+                    notify("Échec de la validation — réessaie.");
+                    return;
+                  }
+                  setEvents((prev) => ({
+                    ...prev,
+                    [ev.code]: { ...prev[ev.code], used: { ...(prev[ev.code].used || {}), [ticketId]: ts } },
+                  }));
                 }}
               />
             )}
@@ -526,24 +539,28 @@ export default function TikeApp() {
                 onBack={() => setView("kEvent")}
                 onPaid={async ({ buyerName, buyerPhone, qty, operator, tier }) => {
                   const ids = Array.from({ length: qty }, () => "TK-" + genCode(4) + "-" + genCode(4));
-                  const updated = {
-                    ...ev,
-                    buyers: [
-                      ...ev.buyers,
-                      {
-                        name: buyerName,
-                        phone: buyerPhone,
-                        qty,
-                        operator,
-                        tierId: tier.id,
-                        tierName: tier.name,
-                        unitPrice: tier.price,
-                        ids,
-                        ts: Date.now(),
-                      },
-                    ],
+                  const buyer = {
+                    name: buyerName,
+                    phone: buyerPhone,
+                    qty,
+                    operator,
+                    tierId: tier.id,
+                    tierName: tier.name,
+                    unitPrice: tier.price,
+                    ids,
+                    ts: Date.now(),
                   };
-                  await saveEvents({ ...events, [ev.code]: updated });
+                  try {
+                    await addBuyerDB(ev.code, buyer);
+                  } catch (err) {
+                    console.error(err);
+                    notify("Échec de l'enregistrement du paiement — réessaie.");
+                    return;
+                  }
+                  setEvents((prev) => ({
+                    ...prev,
+                    [ev.code]: { ...prev[ev.code], buyers: [...prev[ev.code].buyers, buyer] },
+                  }));
                   const newTickets = ids.map((id) => ({
                     id,
                     eventCode: ev.code,
@@ -557,7 +574,7 @@ export default function TikeApp() {
                     buyerName,
                     ts: Date.now(),
                   }));
-                  await saveTickets([...myTickets, ...newTickets]);
+                  saveTickets([...myTickets, ...newTickets]);
                   setView("kTickets");
                   notify("Paiement confirmé — billets reçus 🎟️");
                 }}
