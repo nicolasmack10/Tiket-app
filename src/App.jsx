@@ -1,4 +1,7 @@
 import React, { useState, useEffect, useCallback, useRef } from "react";
+import QRCode from "qrcode";
+import jsQR from "jsqr";
+import { toPng } from "html-to-image";
 import {
   fetchOrganizerEvents,
   fetchClientEvents,
@@ -13,30 +16,26 @@ import {
 import { getSessionProfile, signUp, signIn, signOut } from "./lib/auth";
 
 /* ============================================================
-   TIKÉ v3 — Billetterie par lien, paiement mobile money
-   Nouveautés v3 :
-   - Animations : transitions de vue, révélations en cascade,
-     compteurs animés, anneau de remplissage, micro-interactions
-     (respecte prefers-reduced-motion)
-   - Tableau de bord organisateur : revenus animés, courbe des
-     ventes 7 jours, répartition par catégorie, taux de
-     transformation, activité récente
+   TIKÉ v4 — Billetterie par lien, paiement mobile money
    - Comptes organisateur / client (Supabase Auth), retrait de
      fonds en un clic, tableau de bord client (accès + billets)
+   - Affiche d'événement, lien de partage réel (/e/:code)
+   - Interface claire, responsive, QR codes réels par billet,
+     téléchargement de billet, scan caméra, compte à rebours
    ============================================================ */
 
 const FONT_CSS = `
 @import url('https://fonts.googleapis.com/css2?family=Unbounded:wght@500;700;900&family=Space+Grotesk:wght@400;500;700&display=swap');
 `;
 
-/* ---------- Animations globales ---------- */
+/* ---------- Animations + mise en page responsive ---------- */
 const ANIM_CSS = `
 @keyframes tk-fade-up { from { opacity:0; transform:translateY(14px) } to { opacity:1; transform:none } }
 @keyframes tk-view-in { from { opacity:0; transform:translateY(8px) scale(.995) } to { opacity:1; transform:none } }
 @keyframes tk-pop { 0% { transform:scale(.82); opacity:0 } 60% { transform:scale(1.06) } 100% { transform:scale(1); opacity:1 } }
 @keyframes tk-spin { to { transform:rotate(360deg) } }
-@keyframes tk-scanline { from { top:6% } to { top:90% } }
-@keyframes tk-pulse-green { 0%,100% { box-shadow:0 0 0 0 rgba(61,220,132,.45) } 50% { box-shadow:0 0 0 14px rgba(61,220,132,0) } }
+@keyframes tk-scanline { from { top:6% } to { top:92% } }
+@keyframes tk-pulse-green { 0%,100% { box-shadow:0 0 0 0 rgba(18,166,107,.45) } 50% { box-shadow:0 0 0 14px rgba(18,166,107,0) } }
 @keyframes tk-shake { 10%,90% { transform:translateX(-2px) } 20%,80% { transform:translateX(4px) } 30%,50%,70% { transform:translateX(-7px) } 40%,60% { transform:translateX(7px) } }
 @keyframes tk-toast-in { from { opacity:0; transform:translate(-50%, 18px) } to { opacity:1; transform:translate(-50%, 0) } }
 @keyframes tk-shimmer { from { background-position:-320px 0 } to { background-position:320px 0 } }
@@ -47,9 +46,19 @@ const ANIM_CSS = `
 .tk-reveal { animation: tk-fade-up .5s cubic-bezier(.22,1,.36,1) both; }
 .tk-press { transition: transform .12s ease, border-color .2s ease, background .2s ease; }
 .tk-press:active { transform: scale(.972); }
-.tk-lift { transition: transform .2s cubic-bezier(.22,1,.36,1), border-color .2s ease; }
-.tk-lift:hover { transform: translateY(-3px); border-color: #4A3F7A !important; }
+.tk-lift { transition: transform .2s cubic-bezier(.22,1,.36,1), border-color .2s ease, box-shadow .2s ease; }
+.tk-lift:hover { transform: translateY(-3px); border-color: #D8CCF5 !important; box-shadow: 0 10px 24px rgba(28,21,51,.08); }
 .tk-bar { transform-origin: bottom; animation: tk-bar-grow .6s cubic-bezier(.22,1,.36,1) both; }
+
+.tk-shell { max-width: 460px; margin: 0 auto; padding: 0 18px 40px; box-sizing: border-box; }
+@media (min-width: 640px) { .tk-shell { max-width: 600px; } }
+@media (min-width: 960px) { .tk-shell { max-width: 760px; } }
+
+.tk-kpi-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin-bottom: 14px; }
+@media (max-width: 380px) { .tk-kpi-grid { grid-template-columns: repeat(auto-fit, minmax(92px, 1fr)); } }
+
+.tk-countdown { display: flex; gap: 8px; flex-wrap: wrap; }
+.tk-countdown > div { flex: 1; min-width: 56px; }
 
 @media (prefers-reduced-motion: reduce) {
   .tk-view, .tk-reveal, .tk-bar { animation: none !important; }
@@ -59,22 +68,24 @@ const ANIM_CSS = `
 `;
 
 const C = {
-  bg: "#0E0B1E",
-  surface: "#1A1530",
-  surface2: "#241D42",
-  line: "#332B58",
-  text: "#F2EFFA",
-  muted: "#9C94BC",
-  amber: "#FFB525",
-  amberDark: "#131313",
-  pink: "#FF5D73",
-  green: "#3DDC84",
-  blue: "#5B9DFF",
+  bg: "#F7F5FB",
+  surface: "#FFFFFF",
+  surface2: "#F1EEF9",
+  line: "#E4DEF5",
+  text: "#1C1533",
+  muted: "#77708F",
+  amber: "#FF7A1A",
+  amberDark: "#1C1533",
+  pink: "#FF3D68",
+  green: "#12A66B",
+  blue: "#3366F0",
   mtn: "#FFCB05",
   airtel: "#ED1C24",
 };
 
-const TIER_COLORS = [C.amber, C.pink, C.blue, C.green, "#B57BFF"];
+const HERO_GRADIENT = `linear-gradient(140deg, ${C.amber}, ${C.pink})`;
+
+const TIER_COLORS = [C.amber, C.pink, C.blue, C.green, "#8B5CF6"];
 
 const fmtFCFA = (n) => new Intl.NumberFormat("fr-FR").format(Math.round(n)) + " FCFA";
 const fmtShort = (n) =>
@@ -124,6 +135,22 @@ function useCountUp(target, duration = 900) {
     return () => cancelAnimationFrame(raf);
   }, [target, duration]);
   return v;
+}
+
+function useCountdown(targetMs) {
+  const [now, setNow] = useState(Date.now());
+  useEffect(() => {
+    const id = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(id);
+  }, []);
+  const diff = Math.max(0, targetMs - now);
+  return {
+    d: Math.floor(diff / 86400000),
+    h: Math.floor((diff % 86400000) / 3600000),
+    m: Math.floor((diff % 3600000) / 60000),
+    s: Math.floor((diff % 60000) / 1000),
+    done: diff <= 0,
+  };
 }
 
 /* ============================ UI de base ============================ */
@@ -302,6 +329,79 @@ function Ring({ pct, size = 96, stroke = 9, label, sub }) {
   );
 }
 
+/* ---------- Compte à rebours jusqu'à l'événement ---------- */
+function Countdown({ target }) {
+  const { d, h, m, s, done } = useCountdown(target);
+  if (done) {
+    return <div style={{ fontWeight: 700, color: "#FFFFFF", fontSize: 14 }}>🎉 L'événement a commencé</div>;
+  }
+  const cells = [
+    { v: d, l: "jours" },
+    { v: h, l: "heures" },
+    { v: m, l: "min" },
+    { v: s, l: "sec" },
+  ];
+  return (
+    <div className="tk-countdown">
+      {cells.map((c) => (
+        <div
+          key={c.l}
+          style={{
+            textAlign: "center",
+            background: "rgba(255,255,255,.18)",
+            borderRadius: 10,
+            padding: "8px 4px",
+          }}
+        >
+          <div style={{ fontFamily: "'Unbounded', sans-serif", fontWeight: 700, fontSize: 18, color: "#FFFFFF" }}>
+            {String(c.v).padStart(2, "0")}
+          </div>
+          <div style={{ fontSize: 9, textTransform: "uppercase", letterSpacing: 0.5, color: "rgba(255,255,255,.85)" }}>{c.l}</div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+/* ---------- QR code réel (un par billet) ---------- */
+function TicketQR({ value, size = 64 }) {
+  const [dataUrl, setDataUrl] = useState(null);
+  useEffect(() => {
+    let cancelled = false;
+    QRCode.toDataURL(value, { width: size * 6, margin: 1, color: { dark: "#1C1533", light: "#FFFFFF" } })
+      .then((url) => {
+        if (!cancelled) setDataUrl(url);
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [value, size]);
+  return (
+    <div
+      style={{
+        width: size,
+        height: size,
+        background: "#FFFFFF",
+        borderRadius: 8,
+        border: `1px solid ${C.line}`,
+        padding: 5,
+        boxSizing: "border-box",
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        flexShrink: 0,
+      }}
+    >
+      {dataUrl ? (
+        <img src={dataUrl} alt="QR code du billet" width={size - 12} height={size - 12} style={{ display: "block" }} />
+      ) : (
+        <div style={{ width: size - 12, height: size - 12, background: C.surface2, borderRadius: 4 }} />
+      )}
+    </div>
+  );
+}
+
 /* ---------- Courbe des ventes (7 derniers jours) ---------- */
 function SalesChart({ buyers }) {
   const days = [];
@@ -416,11 +516,36 @@ function TierSplit({ ev }) {
   );
 }
 
-/* ---------- Carte billet (utilisée dans le tableau de bord client) ---------- */
+/* ---------- Carte billet (téléchargeable, QR réel) ---------- */
 function TicketCard({ t, i = 0, muted = false }) {
+  const cardRef = useRef(null);
+  const dlBtnRef = useRef(null);
+  const [downloading, setDownloading] = useState(false);
+
+  const download = async () => {
+    if (!cardRef.current || downloading) return;
+    setDownloading(true);
+    try {
+      const dataUrl = await toPng(cardRef.current, {
+        pixelRatio: 2,
+        backgroundColor: "#FFFFFF",
+        cacheBust: true,
+        filter: (node) => node !== dlBtnRef.current,
+      });
+      const a = document.createElement("a");
+      a.href = dataUrl;
+      a.download = `tike-${t.id}.png`;
+      a.click();
+    } catch (e) {
+      console.error(e);
+    } finally {
+      setDownloading(false);
+    }
+  };
+
   return (
     <Reveal i={i}>
-      <div className="tk-lift" style={{ ...S.card, padding: 0, overflow: "hidden", opacity: muted ? 0.6 : 1 }}>
+      <div ref={cardRef} className="tk-lift" style={{ ...S.card, padding: 0, overflow: "hidden", opacity: muted ? 0.6 : 1 }}>
         <div style={{ padding: "18px 20px 16px" }}>
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
             <div style={{ fontSize: 11, letterSpacing: 2, textTransform: "uppercase", color: C.amber, fontWeight: 700 }}>
@@ -430,7 +555,7 @@ function TicketCard({ t, i = 0, muted = false }) {
               style={{
                 fontSize: 11,
                 fontWeight: 700,
-                background: "rgba(255,181,37,.14)",
+                background: "rgba(255,122,26,.14)",
                 border: `1px solid ${C.amber}`,
                 color: C.amber,
                 borderRadius: 999,
@@ -455,31 +580,29 @@ function TicketCard({ t, i = 0, muted = false }) {
             <div style={{ fontSize: 11, color: C.muted, letterSpacing: 1, textTransform: "uppercase", fontWeight: 700 }}>Code d'entrée</div>
             <div style={{ fontFamily: "'Unbounded', sans-serif", fontWeight: 700, fontSize: 15, color: C.amber, marginTop: 4 }}>{t.id}</div>
           </div>
-          <div
-            aria-hidden
-            style={{
-              width: 62,
-              height: 62,
-              background: C.text,
-              borderRadius: 8,
-              padding: 6,
-              display: "grid",
-              gridTemplateColumns: "repeat(6, 1fr)",
-              gap: 2,
-              boxSizing: "border-box",
-            }}
-          >
-            {Array.from({ length: 36 }).map((_, k) => (
-              <div
-                key={k}
-                style={{
-                  background: (t.id.charCodeAt(k % t.id.length) + k) % 3 === 0 ? C.bg : "transparent",
-                  borderRadius: 1,
-                }}
-              />
-            ))}
-          </div>
+          <TicketQR value={t.id} size={66} />
         </div>
+        <button
+          ref={dlBtnRef}
+          onClick={download}
+          disabled={downloading}
+          className="tk-press"
+          style={{
+            width: "100%",
+            boxSizing: "border-box",
+            background: C.surface2,
+            border: "none",
+            borderTop: `1px solid ${C.line}`,
+            color: C.text,
+            padding: "12px 18px",
+            fontSize: 13.5,
+            fontWeight: 700,
+            cursor: "pointer",
+            fontFamily: "'Space Grotesk', sans-serif",
+          }}
+        >
+          {downloading ? "Préparation…" : "⬇ Télécharger le billet"}
+        </button>
       </div>
     </Reveal>
   );
@@ -591,14 +714,14 @@ export default function TikeApp() {
     <div
       style={{
         minHeight: "100vh",
-        background: `radial-gradient(1200px 600px at 80% -10%, #241D42 0%, ${C.bg} 55%)`,
+        background: `radial-gradient(1200px 600px at 80% -10%, #FDE7D6 0%, ${C.bg} 55%)`,
         color: C.text,
         fontFamily: "'Space Grotesk', sans-serif",
       }}
     >
       <style>{FONT_CSS}</style>
       <style>{ANIM_CSS}</style>
-      <div style={{ maxWidth: 460, margin: "0 auto", padding: "0 18px 40px" }}>
+      <div className="tk-shell">
         {loading ? (
           <div style={{ padding: "70px 0" }}>
             {[0, 1, 2].map((i) => (
@@ -759,12 +882,12 @@ export default function TikeApp() {
             bottom: 24,
             left: "50%",
             background: C.green,
-            color: "#08240F",
+            color: "#FFFFFF",
             fontWeight: 700,
             padding: "12px 20px",
             borderRadius: 999,
             fontSize: 14,
-            boxShadow: "0 8px 30px rgba(0,0,0,.5)",
+            boxShadow: "0 8px 30px rgba(28,21,51,.25)",
             zIndex: 50,
             maxWidth: "90%",
             animation: "tk-toast-in .35s cubic-bezier(.22,1,.36,1) both",
@@ -969,7 +1092,7 @@ function CreatorDash({ profile, events, onLogout, onNew, onOpen }) {
         <div
           style={{
             ...S.card,
-            background: `linear-gradient(140deg, ${C.surface2}, #3A2E6E)`,
+            background: HERO_GRADIENT,
             display: "flex",
             alignItems: "center",
             gap: 18,
@@ -977,22 +1100,22 @@ function CreatorDash({ profile, events, onLogout, onNew, onOpen }) {
           }}
         >
           <div style={{ flex: 1 }}>
-            <div style={S.label}>Revenus encaissés</div>
+            <div style={{ ...S.label, color: "rgba(255,255,255,.8)" }}>Revenus encaissés</div>
             <div
               style={{
                 fontFamily: "'Unbounded', sans-serif",
                 fontWeight: 900,
                 fontSize: 26,
-                color: C.amber,
+                color: "#FFFFFF",
                 lineHeight: 1.1,
                 letterSpacing: -0.5,
               }}
             >
               {fmtFCFA(revAnim)}
             </div>
-            <div style={{ color: C.muted, fontSize: 12, marginTop: 6, lineHeight: 1.5 }}>
+            <div style={{ color: "rgba(255,255,255,.85)", fontSize: 12, marginTop: 6, lineHeight: 1.5 }}>
               Net après commission 5% :<br />
-              <b style={{ color: C.text }}>{fmtFCFA(totalRevenue - commission)}</b>
+              <b style={{ color: "#FFFFFF" }}>{fmtFCFA(totalRevenue - commission)}</b>
             </div>
           </div>
           <Ring pct={fillPct} label="rempli" />
@@ -1001,7 +1124,7 @@ function CreatorDash({ profile, events, onLogout, onNew, onOpen }) {
 
       {/* KPI */}
       <Reveal i={1}>
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 10, marginBottom: 14 }}>
+        <div className="tk-kpi-grid">
           {[
             { k: "Billets", v: Math.round(soldAnim), c: C.text },
             { k: "Scannés", v: scannedAll, c: C.green },
@@ -1403,12 +1526,21 @@ function CreatorEvent({ ev, onBack, onScan, notify, onWithdraw }) {
         </Reveal>
       )}
 
-      {/* Bandeau principal */}
+      {/* Compte à rebours */}
+      <Reveal i={0}>
+        <div style={{ ...S.card, background: HERO_GRADIENT, marginBottom: 14 }}>
+          <div style={{ color: "rgba(255,255,255,.85)", fontSize: 11, letterSpacing: 1, textTransform: "uppercase", fontWeight: 700, marginBottom: 12 }}>
+            {daysLeft >= 0 ? "Compte à rebours" : "Événement terminé"}
+          </div>
+          {daysLeft >= 0 ? <Countdown target={eventDate.getTime()} /> : null}
+        </div>
+      </Reveal>
+
+      {/* Bandeau revenus */}
       <Reveal i={0}>
         <div
           style={{
             ...S.card,
-            background: `linear-gradient(140deg, ${C.surface2}, #3A2E6E)`,
             display: "flex",
             alignItems: "center",
             gap: 18,
@@ -1420,14 +1552,7 @@ function CreatorEvent({ ev, onBack, onScan, notify, onWithdraw }) {
             <div style={{ fontFamily: "'Unbounded', sans-serif", fontWeight: 900, fontSize: 24, color: C.amber, letterSpacing: -0.5 }}>
               {fmtFCFA(revAnim)}
             </div>
-            <div style={{ color: C.muted, fontSize: 12, marginTop: 6 }}>
-              {sold} / {cap} billets ·{" "}
-              {daysLeft >= 0 ? (
-                <b style={{ color: daysLeft <= 3 ? C.pink : C.text }}>J−{daysLeft}</b>
-              ) : (
-                <b style={{ color: C.muted }}>terminé</b>
-              )}
-            </div>
+            <div style={{ color: C.muted, fontSize: 12, marginTop: 6 }}>{sold} / {cap} billets</div>
           </div>
           <Ring pct={pct} label="rempli" />
         </div>
@@ -1435,7 +1560,7 @@ function CreatorEvent({ ev, onBack, onScan, notify, onWithdraw }) {
 
       {/* KPI secondaires */}
       <Reveal i={1}>
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 10, marginBottom: 14 }}>
+        <div className="tk-kpi-grid">
           {[
             { k: "Panier moyen", v: fmtShort(avgBasket), c: C.text },
             { k: "Commandes", v: ev.buyers.length, c: C.blue },
@@ -1586,11 +1711,22 @@ function CreatorEvent({ ev, onBack, onScan, notify, onWithdraw }) {
   );
 }
 
-/* ============================ Scanner anti-fraude ============================ */
+/* ============================ Scanner anti-fraude (caméra QR + saisie manuelle) ============================ */
 function Scanner({ ev, onBack, onMarkUsed }) {
   const [input, setInput] = useState("");
   const [result, setResult] = useState(null);
   const [scanning, setScanning] = useState(false);
+  const [cameraOn, setCameraOn] = useState(false);
+  const [cameraErr, setCameraErr] = useState("");
+
+  const videoRef = useRef(null);
+  const canvasRef = useRef(null);
+  const streamRef = useRef(null);
+  const rafRef = useRef(null);
+  const scanningRef = useRef(false);
+  const resultRef = useRef(null);
+  const checkRef = useRef(null);
+
   const usedCount = Object.keys(ev.used || {}).length;
   const sold = totalSold(ev);
 
@@ -1601,22 +1737,82 @@ function Scanner({ ev, onBack, onMarkUsed }) {
     return null;
   };
 
-  const check = () => {
-    const id = input.trim().toUpperCase();
-    if (!id) return;
-    setScanning(true);
-    setResult(null);
-    setTimeout(async () => {
-      const ticket = findTicket(id);
-      if (!ticket) setResult({ status: "fraud", id });
-      else if (ev.used && ev.used[id]) setResult({ status: "used", id, ticket, usedAt: ev.used[id] });
-      else {
-        await onMarkUsed(id);
-        setResult({ status: "valid", id, ticket });
+  const check = useCallback(
+    (rawId) => {
+      const id = (rawId ?? input).trim().toUpperCase();
+      if (!id) return;
+      setScanning(true);
+      setResult(null);
+      setTimeout(async () => {
+        const ticket = findTicket(id);
+        if (!ticket) setResult({ status: "fraud", id });
+        else if (ev.used && ev.used[id]) setResult({ status: "used", id, ticket, usedAt: ev.used[id] });
+        else {
+          await onMarkUsed(id);
+          setResult({ status: "valid", id, ticket });
+        }
+        setScanning(false);
+      }, 900);
+    },
+    [ev, onMarkUsed, input]
+  );
+
+  useEffect(() => {
+    scanningRef.current = scanning;
+  }, [scanning]);
+  useEffect(() => {
+    resultRef.current = result;
+  }, [result]);
+  useEffect(() => {
+    checkRef.current = check;
+  }, [check]);
+
+  const loop = useCallback(() => {
+    const video = videoRef.current;
+    const canvas = canvasRef.current;
+    if (video && canvas && video.readyState === video.HAVE_ENOUGH_DATA) {
+      canvas.width = video.videoWidth;
+      canvas.height = video.videoHeight;
+      const ctx = canvas.getContext("2d");
+      ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+      const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+      const code = jsQR(imageData.data, imageData.width, imageData.height);
+      if (code && code.data && !scanningRef.current && !resultRef.current) {
+        setInput(code.data);
+        checkRef.current?.(code.data);
       }
-      setScanning(false);
-    }, 900);
+    }
+    rafRef.current = requestAnimationFrame(loop);
+  }, []);
+
+  const stopCamera = useCallback(() => {
+    if (rafRef.current) cancelAnimationFrame(rafRef.current);
+    rafRef.current = null;
+    if (streamRef.current) {
+      streamRef.current.getTracks().forEach((t) => t.stop());
+      streamRef.current = null;
+    }
+    setCameraOn(false);
+  }, []);
+
+  const startCamera = async () => {
+    setCameraErr("");
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" } });
+      streamRef.current = stream;
+      if (videoRef.current) {
+        videoRef.current.srcObject = stream;
+        await videoRef.current.play();
+      }
+      setCameraOn(true);
+      rafRef.current = requestAnimationFrame(loop);
+    } catch (e) {
+      console.error(e);
+      setCameraErr("Impossible d'accéder à la caméra — utilise la saisie manuelle ci-dessous.");
+    }
   };
+
+  useEffect(() => () => stopCamera(), [stopCamera]);
 
   const reset = () => {
     setInput("");
@@ -1624,9 +1820,9 @@ function Scanner({ ev, onBack, onMarkUsed }) {
   };
 
   const R = {
-    valid: { bg: "rgba(61,220,132,.12)", border: C.green, icon: "✅", title: "BILLET VALIDE", color: C.green },
-    used: { bg: "rgba(255,181,37,.12)", border: C.amber, icon: "⚠️", title: "DÉJÀ UTILISÉ", color: C.amber },
-    fraud: { bg: "rgba(255,93,115,.14)", border: C.pink, icon: "🚫", title: "BILLET INCONNU — FRAUDE POSSIBLE", color: C.pink },
+    valid: { bg: "rgba(18,166,107,.12)", border: C.green, icon: "✅", title: "BILLET VALIDE", color: C.green },
+    used: { bg: "rgba(255,122,26,.12)", border: C.amber, icon: "⚠️", title: "DÉJÀ UTILISÉ", color: C.amber },
+    fraud: { bg: "rgba(255,61,104,.12)", border: C.pink, icon: "🚫", title: "BILLET INCONNU — FRAUDE POSSIBLE", color: C.pink },
   };
 
   return (
@@ -1649,22 +1845,42 @@ function Scanner({ ev, onBack, onMarkUsed }) {
       <Reveal i={1}>
         <div style={{ ...S.card, marginBottom: 16 }}>
           <div
-            aria-hidden
             style={{
-              height: 120,
+              position: "relative",
+              height: 220,
               borderRadius: 14,
               border: `2px dashed ${scanning ? C.amber : C.line}`,
-              display: "flex",
-              alignItems: "center",
-              justifyContent: "center",
-              marginBottom: 14,
-              position: "relative",
               overflow: "hidden",
+              marginBottom: 14,
               background: C.surface2,
               transition: "border-color .3s ease",
             }}
           >
-            {scanning && (
+            <video
+              ref={videoRef}
+              playsInline
+              muted
+              style={{ width: "100%", height: "100%", objectFit: "cover", display: cameraOn ? "block" : "none" }}
+            />
+            <canvas ref={canvasRef} style={{ display: "none" }} />
+            {!cameraOn && (
+              <div
+                style={{
+                  position: "absolute",
+                  inset: 0,
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  padding: "0 20px",
+                  textAlign: "center",
+                  color: C.muted,
+                  fontSize: 13,
+                }}
+              >
+                {cameraErr || "Active la caméra pour scanner le QR code du billet, ou saisis le code manuellement."}
+              </div>
+            )}
+            {(cameraOn || scanning) && (
               <div
                 style={{
                   position: "absolute",
@@ -1673,15 +1889,17 @@ function Scanner({ ev, onBack, onMarkUsed }) {
                   height: 3,
                   background: C.amber,
                   boxShadow: `0 0 16px ${C.amber}`,
-                  animation: "tk-scanline .9s ease-in-out infinite alternate",
+                  animation: "tk-scanline 1.6s ease-in-out infinite alternate",
                 }}
               />
             )}
-            <div style={{ color: C.muted, fontSize: 13, textAlign: "center", padding: "0 20px", whiteSpace: "pre-line" }}>
-              {scanning ? "Analyse du billet…" : "📷 En production : scan caméra du QR code.\nIci, saisis le code du billet."}
-            </div>
           </div>
-          <label style={S.label}>Code du billet</label>
+
+          <button className="tk-press" style={{ ...S.btnGhost, marginBottom: 14 }} onClick={cameraOn ? stopCamera : startCamera}>
+            {cameraOn ? "Désactiver la caméra" : "📷 Scanner avec la caméra"}
+          </button>
+
+          <label style={S.label}>Ou saisis le code manuellement</label>
           <input
             style={{ ...S.input, textTransform: "uppercase" }}
             value={input}
@@ -1693,7 +1911,7 @@ function Scanner({ ev, onBack, onMarkUsed }) {
             className="tk-press"
             style={{ ...S.btn, opacity: input.trim() && !scanning ? 1 : 0.4 }}
             disabled={!input.trim() || scanning}
-            onClick={check}
+            onClick={() => check()}
           >
             {scanning ? "Vérification…" : "Vérifier le billet"}
           </button>
@@ -1913,16 +2131,19 @@ function ClientEvent({ ev, onBack, onBuy }) {
       <Reveal i={0}>
         <div style={{ ...S.card, padding: 0, overflow: "hidden" }}>
           {ev.posterUrl && <img src={ev.posterUrl} alt="" style={{ width: "100%", display: "block", aspectRatio: "4 / 5", objectFit: "cover" }} />}
-          <div style={{ background: `linear-gradient(135deg, ${C.surface2}, #3A2E6E)`, padding: "26px 20px 22px" }}>
-            <div style={{ fontSize: 12, letterSpacing: 2, textTransform: "uppercase", color: C.amber, fontWeight: 700 }}>Invitation</div>
-            <div style={{ fontFamily: "'Unbounded', sans-serif", fontWeight: 900, fontSize: 24, lineHeight: 1.15, margin: "8px 0 10px" }}>
+          <div style={{ background: HERO_GRADIENT, padding: "26px 20px 22px" }}>
+            <div style={{ fontSize: 12, letterSpacing: 2, textTransform: "uppercase", color: "rgba(255,255,255,.85)", fontWeight: 700 }}>
+              Invitation
+            </div>
+            <div style={{ fontFamily: "'Unbounded', sans-serif", fontWeight: 900, fontSize: 24, lineHeight: 1.15, margin: "8px 0 10px", color: "#FFFFFF" }}>
               {ev.name}
             </div>
-            <div style={{ color: C.text, fontSize: 14.5, lineHeight: 1.7 }}>
+            <div style={{ color: "rgba(255,255,255,.92)", fontSize: 14.5, lineHeight: 1.7, marginBottom: 16 }}>
               📅 {dateStr} à {ev.time}
               <br />
               📍 {ev.venue}, {ev.city}
             </div>
+            {d && <Countdown target={d.getTime()} />}
           </div>
           <div style={{ padding: "20px 20px 22px" }}>
             <Perf />
@@ -2016,7 +2237,7 @@ function Payment({ ev, profile, onBack, onPaid }) {
                     padding: "12px 14px",
                     borderRadius: 12,
                     border: sel ? `2px solid ${C.amber}` : `1px solid ${C.line}`,
-                    background: sel ? "rgba(255,181,37,.08)" : C.surface2,
+                    background: sel ? "rgba(255,122,26,.08)" : C.surface2,
                     color: C.text,
                     cursor: l > 0 ? "pointer" : "not-allowed",
                     opacity: l > 0 ? 1 : 0.4,
