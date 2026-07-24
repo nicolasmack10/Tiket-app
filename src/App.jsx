@@ -16,6 +16,11 @@ import {
   setSuspendedDB,
   adminDeleteAccountDB,
   adminDeleteEventDB,
+  joinQueueDB,
+  queuePositionDB,
+  tryAdmitSelfDB,
+  leaveQueueDB,
+  fetchQueueCountDB,
 } from "./lib/db";
 import { getSessionProfile, signUp, signIn, signOut } from "./lib/auth";
 
@@ -902,7 +907,12 @@ export default function TikeApp() {
                 notify={notify}
               />
             )}
-            {view === "kEvent" && ev && <ClientEvent ev={ev} onBack={() => setView("clientDash")} onBuy={() => setView("kPay")} />}
+            {view === "kEvent" && ev && (
+              <ClientEvent ev={ev} onBack={() => setView("clientDash")} onBuy={() => setView(ev.queueEnabled ? "kQueue" : "kPay")} />
+            )}
+            {view === "kQueue" && ev && profile && (
+              <Queue ev={ev} profile={profile} onAdmitted={() => setView("kPay")} onBack={() => setView("kEvent")} notify={notify} />
+            )}
             {view === "kPay" && ev && profile && (
               <Payment
                 ev={ev}
@@ -1327,6 +1337,7 @@ function NewEvent({ profile, onBack, onCreate }) {
   const [posterFile, setPosterFile] = useState(null);
   const [posterPreview, setPosterPreview] = useState(null);
   const [posterErr, setPosterErr] = useState("");
+  const [queueEnabled, setQueueEnabled] = useState(false);
   const [creating, setCreating] = useState(false);
   const set = (k) => (e) => setF({ ...f, [k]: e.target.value });
 
@@ -1385,6 +1396,7 @@ function NewEvent({ profile, onBack, onCreate }) {
       city: f.city,
       desc: f.desc,
       posterUrl,
+      queueEnabled,
       tiers: tiers.map((t) => ({ id: t.id, name: t.name.trim(), price: Number(t.price), capacity: Number(t.capacity) })),
       buyers: [],
       used: {},
@@ -1457,6 +1469,58 @@ function NewEvent({ profile, onBack, onCreate }) {
       </Reveal>
 
       <Reveal i={2}>
+        <button
+          type="button"
+          onClick={() => setQueueEnabled((v) => !v)}
+          className="tk-press"
+          style={{
+            ...S.card,
+            width: "100%",
+            marginBottom: 16,
+            display: "flex",
+            alignItems: "center",
+            gap: 14,
+            textAlign: "left",
+            cursor: "pointer",
+            border: `1px solid ${queueEnabled ? C.amber : C.line}`,
+          }}
+        >
+          <div
+            style={{
+              width: 44,
+              height: 26,
+              borderRadius: 999,
+              background: queueEnabled ? C.amber : C.surface2,
+              border: `1px solid ${queueEnabled ? C.amber : C.line}`,
+              position: "relative",
+              flexShrink: 0,
+              transition: "background .2s ease",
+            }}
+          >
+            <div
+              style={{
+                position: "absolute",
+                top: 2,
+                left: queueEnabled ? 20 : 2,
+                width: 20,
+                height: 20,
+                borderRadius: "50%",
+                background: "#FFFFFF",
+                transition: "left .2s ease",
+                boxShadow: "0 1px 3px rgba(28,21,51,.3)",
+              }}
+            />
+          </div>
+          <div>
+            <div style={{ fontWeight: 700, fontSize: 14.5 }}>File d'attente virtuelle</div>
+            <div style={{ color: C.muted, fontSize: 12.5, marginTop: 2, lineHeight: 1.5 }}>
+              Recommandé en cas de forte demande : les clients patientent et sont admis un par un avant de pouvoir payer.
+            </div>
+          </div>
+        </button>
+      </Reveal>
+
+      <Reveal i={3}>
         <div style={{ ...S.card, marginBottom: 16 }}>
           <div style={{ ...S.label, marginBottom: 12 }}>Catégories de billets</div>
           {tiers.map((t, i) => (
@@ -1529,7 +1593,7 @@ function NewEvent({ profile, onBack, onCreate }) {
         </div>
       </Reveal>
 
-      <Reveal i={3}>
+      <Reveal i={4}>
         <button className="tk-press" style={{ ...S.btn, opacity: ok && !creating ? 1 : 0.4 }} disabled={!ok || creating} onClick={handleCreate}>
           {creating ? "Création…" : "Créer et obtenir mon lien"}
         </button>
@@ -1541,6 +1605,18 @@ function NewEvent({ profile, onBack, onCreate }) {
 /* ---------- TABLEAU DE BORD ÉVÉNEMENT ---------- */
 function CreatorEvent({ ev, onBack, onScan, notify, onWithdraw }) {
   const [withdrawing, setWithdrawing] = useState(false);
+  const [queueCount, setQueueCount] = useState(null);
+  useEffect(() => {
+    if (!ev.queueEnabled) return;
+    let cancelled = false;
+    const poll = () => fetchQueueCountDB(ev.code).then((n) => !cancelled && setQueueCount(n)).catch(() => {});
+    poll();
+    const id = setInterval(poll, 5000);
+    return () => {
+      cancelled = true;
+      clearInterval(id);
+    };
+  }, [ev.code, ev.queueEnabled]);
   const link = `${window.location.origin}/e/${ev.code}`;
   const rev = revenue(ev);
   const sold = totalSold(ev);
@@ -1704,6 +1780,20 @@ function CreatorEvent({ ev, onBack, onScan, notify, onWithdraw }) {
           </div>
         </div>
       </Reveal>
+
+      {ev.queueEnabled && queueCount != null && queueCount > 0 && (
+        <Reveal i={3}>
+          <div style={{ ...S.card, marginBottom: 14, display: "flex", alignItems: "center", gap: 12 }}>
+            <div style={{ fontSize: 22 }}>⏳</div>
+            <div>
+              <div style={{ fontWeight: 700, fontSize: 14.5 }}>
+                {queueCount} personne{queueCount > 1 ? "s" : ""} en file d'attente
+              </div>
+              <div style={{ color: C.muted, fontSize: 12.5 }}>Admission automatique, une par une.</div>
+            </div>
+          </div>
+        </Reveal>
+      )}
 
       {/* Contrôle d'entrée */}
       <Reveal i={4}>
@@ -2697,6 +2787,103 @@ function AdminDash({ profile, data, onLogout, onSuspend, onDeleteAccount, onDele
                 </div>
               ))
           )}
+        </div>
+      </Reveal>
+    </div>
+  );
+}
+
+/* ============================ SALLE D'ATTENTE ============================ */
+function Queue({ ev, profile, onAdmitted, onBack, notify }) {
+  const [position, setPosition] = useState(null);
+  const [err, setErr] = useState("");
+  const [leaving, setLeaving] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    let interval;
+
+    const tick = async () => {
+      try {
+        const admitted = await tryAdmitSelfDB(ev.code);
+        if (admitted) {
+          if (!cancelled) onAdmitted();
+          return;
+        }
+        const pos = await queuePositionDB(ev.code);
+        if (!cancelled) setPosition(pos);
+      } catch (e) {
+        console.error(e);
+      }
+    };
+
+    (async () => {
+      try {
+        const alreadyAdmitted = await joinQueueDB(ev.code, profile.id);
+        if (alreadyAdmitted) {
+          if (!cancelled) onAdmitted();
+          return;
+        }
+        await tick();
+        if (!cancelled) interval = setInterval(tick, 1500);
+      } catch (e) {
+        console.error(e);
+        if (!cancelled) setErr("Impossible de rejoindre la file d'attente — réessaie.");
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+      clearInterval(interval);
+    };
+  }, [ev.code, profile.id]); // eslint-disable-line
+
+  const leave = async () => {
+    setLeaving(true);
+    try {
+      await leaveQueueDB(ev.code, profile.id);
+    } catch (e) {
+      console.error(e);
+      notify("Erreur réseau — réessaie.");
+      setLeaving(false);
+      return;
+    }
+    onBack();
+  };
+
+  return (
+    <div>
+      <Top title="File d'attente" />
+      <Reveal i={0}>
+        <div style={{ ...S.card, textAlign: "center", padding: "36px 24px" }}>
+          <div style={{ fontSize: 42, marginBottom: 14, animation: "tk-float 2.4s ease-in-out infinite" }}>⏳</div>
+          <div style={{ fontFamily: "'Unbounded', sans-serif", fontWeight: 900, fontSize: 20, marginBottom: 10, lineHeight: 1.3 }}>
+            {position === null
+              ? "Connexion à la file…"
+              : position === 0
+              ? "C'est presque ton tour…"
+              : `Tu es ${position + 1}ᵉ dans la file`}
+          </div>
+          <div style={{ color: C.muted, fontSize: 14, lineHeight: 1.6, marginBottom: 22 }}>
+            Forte demande pour <b style={{ color: C.text }}>{ev.name}</b>. On te laisse passer automatiquement — reste sur cette
+            page, pas besoin de rafraîchir.
+          </div>
+          <div style={{ height: 8, borderRadius: 999, background: C.surface2, overflow: "hidden" }}>
+            <div
+              style={{
+                height: "100%",
+                width: "45%",
+                borderRadius: 999,
+                background: `linear-gradient(90deg, ${C.amber}, ${C.pink})`,
+                backgroundSize: "220% 100%",
+                animation: "tk-shimmer 1.3s linear infinite",
+              }}
+            />
+          </div>
+          {err && <div style={{ color: C.pink, fontSize: 13, marginTop: 18 }}>{err}</div>}
+          <button className="tk-press" style={{ ...S.btnGhost, marginTop: 26 }} disabled={leaving} onClick={leave}>
+            {leaving ? "…" : "Quitter la file"}
+          </button>
         </div>
       </Reveal>
     </div>

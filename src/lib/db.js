@@ -12,6 +12,7 @@ function rowToEvent(row) {
     city: row.city,
     desc: row.description,
     posterUrl: row.poster_url,
+    queueEnabled: row.queue_enabled,
     tiers: row.tiers || [],
     used: row.used || {},
     ts: row.ts,
@@ -79,6 +80,7 @@ export async function createEventDB(ev) {
     city: ev.city,
     description: ev.desc,
     poster_url: ev.posterUrl,
+    queue_enabled: ev.queueEnabled,
     tiers: ev.tiers,
     used: ev.used,
     ts: ev.ts,
@@ -199,4 +201,46 @@ export async function adminDeleteAccountDB(userId) {
 export async function adminDeleteEventDB(code) {
   const { error } = await supabase.from("events").delete().eq("code", code);
   if (error) throw error;
+}
+
+/* ---------- Salle d'attente avant achat ---------- */
+export async function joinQueueDB(eventCode, userId) {
+  const { data: existing, error: e1 } = await supabase
+    .from("queue")
+    .select("admitted_at")
+    .eq("event_code", eventCode)
+    .eq("user_id", userId)
+    .maybeSingle();
+  if (e1) throw e1;
+  if (existing) return existing.admitted_at != null;
+  const { error: e2 } = await supabase.from("queue").insert({ event_code: eventCode, user_id: userId, joined_at: Date.now() });
+  if (e2) throw e2;
+  return false;
+}
+
+export async function queuePositionDB(eventCode) {
+  const { data, error } = await supabase.rpc("queue_position", { p_event_code: eventCode });
+  if (error) throw error;
+  return data;
+}
+
+export async function tryAdmitSelfDB(eventCode) {
+  const { data, error } = await supabase.rpc("try_admit_self", { p_event_code: eventCode });
+  if (error) throw error;
+  return data;
+}
+
+export async function leaveQueueDB(eventCode, userId) {
+  const { error } = await supabase.from("queue").delete().eq("event_code", eventCode).eq("user_id", userId);
+  if (error) throw error;
+}
+
+export async function fetchQueueCountDB(eventCode) {
+  const { count, error } = await supabase
+    .from("queue")
+    .select("*", { count: "exact", head: true })
+    .eq("event_code", eventCode)
+    .is("admitted_at", null);
+  if (error) throw error;
+  return count || 0;
 }
