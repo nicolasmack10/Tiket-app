@@ -12,6 +12,10 @@ import {
   withdrawFundsDB,
   openEventByCode,
   recordEventAccess,
+  fetchAdminOverview,
+  setSuspendedDB,
+  adminDeleteAccountDB,
+  adminDeleteEventDB,
 } from "./lib/db";
 import { getSessionProfile, signUp, signIn, signOut } from "./lib/auth";
 
@@ -614,6 +618,7 @@ export default function TikeApp() {
   const [profile, setProfile] = useState(null);
   const [pendingRole, setPendingRole] = useState("organizer");
   const [events, setEvents] = useState({});
+  const [adminData, setAdminData] = useState(null);
   const [activeCode, setActiveCode] = useState(null);
   const [toast, setToast] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -638,6 +643,15 @@ export default function TikeApp() {
     } catch (e) {
       console.error(e);
       notify("Impossible de charger tes événements.");
+    }
+  }, []);
+
+  const loadAdminData = useCallback(async () => {
+    try {
+      setAdminData(await fetchAdminOverview());
+    } catch (e) {
+      console.error(e);
+      notify("Impossible de charger les données admin.");
     }
   }, []);
 
@@ -673,6 +687,9 @@ export default function TikeApp() {
         if (p.role === "organizer") {
           await loadOrganizerEvents(p.id);
           setView("cDash");
+        } else if (p.role === "admin") {
+          await loadAdminData();
+          setView("adminDash");
         } else {
           await loadClientEvents(p.id);
           const code = pendingCode.current;
@@ -692,6 +709,9 @@ export default function TikeApp() {
     if (p.role === "organizer") {
       await loadOrganizerEvents(p.id);
       setView("cDash");
+    } else if (p.role === "admin") {
+      await loadAdminData();
+      setView("adminDash");
     } else {
       await loadClientEvents(p.id);
       const code = pendingCode.current;
@@ -704,6 +724,7 @@ export default function TikeApp() {
     await signOut();
     setProfile(null);
     setEvents({});
+    setAdminData(null);
     setActiveCode(null);
     setView("home");
   };
@@ -820,6 +841,50 @@ export default function TikeApp() {
                     ...prev,
                     [ev.code]: { ...prev[ev.code], used: { ...(prev[ev.code].used || {}), [ticketId]: ts } },
                   }));
+                }}
+              />
+            )}
+
+            {view === "adminDash" && profile && adminData && (
+              <AdminDash
+                profile={profile}
+                data={adminData}
+                onLogout={handleLogout}
+                notify={notify}
+                onSuspend={async (userId, suspended) => {
+                  try {
+                    await setSuspendedDB(userId, suspended);
+                  } catch (err) {
+                    console.error(err);
+                    notify("Échec de la mise à jour du compte.");
+                    return;
+                  }
+                  setAdminData((prev) => ({
+                    ...prev,
+                    profiles: prev.profiles.map((p) => (p.id === userId ? { ...p, suspended } : p)),
+                  }));
+                }}
+                onDeleteAccount={async (userId) => {
+                  try {
+                    await adminDeleteAccountDB(userId);
+                  } catch (err) {
+                    console.error(err);
+                    notify("Échec de la suppression du compte.");
+                    return;
+                  }
+                  setAdminData((prev) => ({ ...prev, profiles: prev.profiles.filter((p) => p.id !== userId) }));
+                  notify("Compte supprimé.");
+                }}
+                onDeleteEvent={async (code) => {
+                  try {
+                    await adminDeleteEventDB(code);
+                  } catch (err) {
+                    console.error(err);
+                    notify("Échec de la suppression de l'événement.");
+                    return;
+                  }
+                  setAdminData((prev) => ({ ...prev, events: prev.events.filter((e) => e.code !== code) }));
+                  notify("Événement supprimé.");
                 }}
               />
             )}
@@ -2364,6 +2429,276 @@ function Payment({ ev, profile, onBack, onPaid }) {
           <div style={{ color: C.muted, fontSize: 13.5, marginTop: 8 }}>Ne ferme pas cette page.</div>
         </div>
       )}
+    </div>
+  );
+}
+
+/* ============================ SUPER ADMIN ============================ */
+function AccountRow({ p, eventCount, onSuspend, onDelete, busy }) {
+  return (
+    <div
+      style={{
+        display: "flex",
+        alignItems: "center",
+        gap: 10,
+        padding: "12px 0",
+        borderBottom: `1px solid ${C.line}`,
+      }}
+    >
+      <div style={{ flex: 1, minWidth: 0 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          <div style={{ fontWeight: 700, fontSize: 14, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{p.name}</div>
+          {p.suspended && (
+            <div
+              style={{
+                fontSize: 10,
+                fontWeight: 700,
+                color: C.pink,
+                background: "rgba(255,61,104,.12)",
+                border: `1px solid ${C.pink}`,
+                borderRadius: 999,
+                padding: "2px 8px",
+                textTransform: "uppercase",
+                letterSpacing: 0.5,
+                flexShrink: 0,
+              }}
+            >
+              Suspendu
+            </div>
+          )}
+        </div>
+        <div style={{ color: C.muted, fontSize: 12 }}>
+          {p.phone || "—"}
+          {eventCount != null && ` · ${eventCount} événement${eventCount > 1 ? "s" : ""}`}
+        </div>
+      </div>
+      <button
+        className="tk-press"
+        disabled={busy}
+        onClick={() => onSuspend(p.id, !p.suspended)}
+        style={{
+          background: "transparent",
+          border: `1px solid ${C.line}`,
+          color: C.text,
+          borderRadius: 8,
+          padding: "7px 10px",
+          fontSize: 12,
+          fontWeight: 700,
+          cursor: "pointer",
+          fontFamily: "'Space Grotesk', sans-serif",
+          whiteSpace: "nowrap",
+          opacity: busy ? 0.5 : 1,
+        }}
+      >
+        {p.suspended ? "Réactiver" : "Suspendre"}
+      </button>
+      <button
+        className="tk-press"
+        disabled={busy}
+        onClick={() => {
+          if (window.confirm(`Supprimer définitivement le compte de ${p.name} ? Cette action est irréversible.`)) onDelete(p.id);
+        }}
+        style={{
+          background: "transparent",
+          border: `1px solid ${C.pink}`,
+          color: C.pink,
+          borderRadius: 8,
+          padding: "7px 10px",
+          fontSize: 12,
+          fontWeight: 700,
+          cursor: "pointer",
+          fontFamily: "'Space Grotesk', sans-serif",
+          opacity: busy ? 0.5 : 1,
+        }}
+      >
+        Suppr.
+      </button>
+    </div>
+  );
+}
+
+function AdminDash({ profile, data, onLogout, onSuspend, onDeleteAccount, onDeleteEvent, notify }) {
+  const [busyId, setBusyId] = useState(null);
+  const { profiles, events } = data;
+
+  const organizers = profiles.filter((p) => p.role === "organizer").sort((a, b) => a.name.localeCompare(b.name));
+  const clients = profiles.filter((p) => p.role === "client").sort((a, b) => a.name.localeCompare(b.name));
+  const eventsByOrganizer = {};
+  for (const e of events) eventsByOrganizer[e.creatorId] = (eventsByOrganizer[e.creatorId] || 0) + 1;
+
+  const totalRevenue = events.reduce((s, e) => s + revenue(e), 0);
+  const totalCommission = totalRevenue * 0.05;
+  const totalTickets = events.reduce((s, e) => s + totalSold(e), 0);
+  const revAnim = useCountUp(totalCommission);
+
+  const wrapSuspend = async (userId, suspended) => {
+    setBusyId(userId);
+    await onSuspend(userId, suspended);
+    setBusyId(null);
+  };
+  const wrapDeleteAccount = async (userId) => {
+    setBusyId(userId);
+    await onDeleteAccount(userId);
+    setBusyId(null);
+  };
+  const wrapDeleteEvent = async (code) => {
+    setBusyId(code);
+    await onDeleteEvent(code);
+    setBusyId(null);
+  };
+
+  const exportCommissionsCSV = () => {
+    const rows = [["Organisateur", "Téléphone", "Événements", "Revenu brut (FCFA)", "Commission 5% (FCFA)"]];
+    for (const p of organizers) {
+      const orgEvents = events.filter((e) => e.creatorId === p.id);
+      const rev = orgEvents.reduce((s, e) => s + revenue(e), 0);
+      rows.push([p.name, p.phone || "", orgEvents.length, Math.round(rev), Math.round(rev * 0.05)]);
+    }
+    const csv = rows.map((r) => r.map((v) => `"${String(v).replace(/"/g, '""')}"`).join(",")).join("\n");
+    const blob = new Blob(["﻿" + csv], { type: "text/csv;charset=utf-8;" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `tike-commissions-${new Date().toISOString().slice(0, 10)}.csv`;
+    a.click();
+    URL.revokeObjectURL(url);
+    notify("Export CSV téléchargé.");
+  };
+
+  return (
+    <div>
+      <Top title={`Admin — ${profile.name}`} right={<LogoutButton onClick={onLogout} />} />
+
+      {/* Commissions plateforme */}
+      <Reveal i={0}>
+        <div style={{ ...S.card, background: HERO_GRADIENT, marginBottom: 14 }}>
+          <div style={{ color: "rgba(255,255,255,.8)", fontSize: 11, letterSpacing: 1, textTransform: "uppercase", fontWeight: 700, marginBottom: 6 }}>
+            Commissions collectées (5%)
+          </div>
+          <div style={{ fontFamily: "'Unbounded', sans-serif", fontWeight: 900, fontSize: 26, color: "#FFFFFF", letterSpacing: -0.5 }}>
+            {fmtFCFA(revAnim)}
+          </div>
+          <div style={{ color: "rgba(255,255,255,.85)", fontSize: 12, marginTop: 6 }}>
+            sur {fmtFCFA(totalRevenue)} de revenus bruts, {totalTickets} billets vendus
+          </div>
+        </div>
+      </Reveal>
+
+      {/* KPI */}
+      <Reveal i={1}>
+        <div className="tk-kpi-grid">
+          {[
+            { k: "Organisateurs", v: organizers.length, c: C.blue },
+            { k: "Clients", v: clients.length, c: C.green },
+            { k: "Événements", v: events.length, c: C.amber },
+          ].map((x) => (
+            <div key={x.k} style={{ ...S.card, padding: 14, textAlign: "center" }}>
+              <div style={{ fontFamily: "'Unbounded', sans-serif", fontWeight: 700, fontSize: 20, color: x.c }}>{x.v}</div>
+              <div style={{ fontSize: 10.5, color: C.muted, letterSpacing: 0.6, textTransform: "uppercase", fontWeight: 700, marginTop: 3 }}>
+                {x.k}
+              </div>
+            </div>
+          ))}
+        </div>
+      </Reveal>
+
+      <Reveal i={2}>
+        <button className="tk-press" style={{ ...S.btnGhost, marginBottom: 20 }} onClick={exportCommissionsCSV}>
+          ⬇ Exporter les commissions par organisateur (CSV)
+        </button>
+      </Reveal>
+
+      {/* Organisateurs */}
+      <Reveal i={3}>
+        <div style={{ ...S.card, marginBottom: 14 }}>
+          <div style={{ ...S.label, marginBottom: 4 }}>Organisateurs ({organizers.length})</div>
+          {organizers.length === 0 ? (
+            <div style={{ color: C.muted, fontSize: 13.5, padding: "10px 0" }}>Aucun organisateur inscrit.</div>
+          ) : (
+            organizers.map((p) => (
+              <AccountRow
+                key={p.id}
+                p={p}
+                eventCount={eventsByOrganizer[p.id] || 0}
+                busy={busyId === p.id}
+                onSuspend={wrapSuspend}
+                onDelete={wrapDeleteAccount}
+              />
+            ))
+          )}
+        </div>
+      </Reveal>
+
+      {/* Clients */}
+      <Reveal i={4}>
+        <div style={{ ...S.card, marginBottom: 14 }}>
+          <div style={{ ...S.label, marginBottom: 4 }}>Clients ({clients.length})</div>
+          {clients.length === 0 ? (
+            <div style={{ color: C.muted, fontSize: 13.5, padding: "10px 0" }}>Aucun client inscrit.</div>
+          ) : (
+            clients.map((p) => (
+              <AccountRow key={p.id} p={p} busy={busyId === p.id} onSuspend={wrapSuspend} onDelete={wrapDeleteAccount} />
+            ))
+          )}
+        </div>
+      </Reveal>
+
+      {/* Événements */}
+      <Reveal i={5}>
+        <div style={S.card}>
+          <div style={{ ...S.label, marginBottom: 4 }}>Tous les événements ({events.length})</div>
+          {events.length === 0 ? (
+            <div style={{ color: C.muted, fontSize: 13.5, padding: "10px 0" }}>Aucun événement pour l'instant.</div>
+          ) : (
+            events
+              .slice()
+              .sort((a, b) => b.ts - a.ts)
+              .map((e) => (
+                <div
+                  key={e.code}
+                  style={{
+                    display: "flex",
+                    alignItems: "center",
+                    gap: 10,
+                    padding: "12px 0",
+                    borderBottom: `1px solid ${C.line}`,
+                  }}
+                >
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ fontWeight: 700, fontSize: 14, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+                      {e.name}
+                    </div>
+                    <div style={{ color: C.muted, fontSize: 12 }}>
+                      {e.date} · {e.venue}, {e.city} · {fmtFCFA(revenue(e))}
+                    </div>
+                  </div>
+                  <button
+                    className="tk-press"
+                    disabled={busyId === e.code}
+                    onClick={() => {
+                      if (window.confirm(`Supprimer définitivement « ${e.name} » et toutes ses ventes ?`)) wrapDeleteEvent(e.code);
+                    }}
+                    style={{
+                      background: "transparent",
+                      border: `1px solid ${C.pink}`,
+                      color: C.pink,
+                      borderRadius: 8,
+                      padding: "7px 10px",
+                      fontSize: 12,
+                      fontWeight: 700,
+                      cursor: "pointer",
+                      fontFamily: "'Space Grotesk', sans-serif",
+                      opacity: busyId === e.code ? 0.5 : 1,
+                      flexShrink: 0,
+                    }}
+                  >
+                    Suppr.
+                  </button>
+                </div>
+              ))
+          )}
+        </div>
+      </Reveal>
     </div>
   );
 }

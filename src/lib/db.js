@@ -165,3 +165,38 @@ export async function addBuyerDB(eventCode, userId, buyer) {
   });
   if (error) throw error;
 }
+
+/* ---------- Super admin ---------- */
+function rowToProfile(row) {
+  return { id: row.id, role: row.role, name: row.name, phone: row.phone, suspended: row.suspended, createdAt: row.created_at };
+}
+
+export async function fetchAdminOverview() {
+  const [{ data: profileRows, error: e1 }, { data: eventRows, error: e2 }] = await Promise.all([
+    supabase.from("profiles").select("*"),
+    supabase.from("events").select("*"),
+  ]);
+  if (e1) throw e1;
+  if (e2) throw e2;
+
+  const byCode = await assemble(eventRows, eventRows.map((r) => r.code));
+  return {
+    profiles: profileRows.map(rowToProfile),
+    events: Object.values(byCode),
+  };
+}
+
+export async function setSuspendedDB(userId, suspended) {
+  const { error } = await supabase.from("profiles").update({ suspended }).eq("id", userId);
+  if (error) throw error;
+}
+
+export async function adminDeleteAccountDB(userId) {
+  const { error } = await supabase.from("profiles").delete().eq("id", userId);
+  if (error) throw error;
+}
+
+export async function adminDeleteEventDB(code) {
+  const { error } = await supabase.from("events").delete().eq("code", code);
+  if (error) throw error;
+}
