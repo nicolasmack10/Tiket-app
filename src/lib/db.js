@@ -23,6 +23,7 @@ function rowToEvent(row) {
 
 function rowToBuyer(row) {
   return {
+    id: row.id,
     userId: row.user_id,
     name: row.name,
     phone: row.phone,
@@ -31,7 +32,8 @@ function rowToBuyer(row) {
     tierId: row.tier_id,
     tierName: row.tier_name,
     unitPrice: Number(row.unit_price),
-    ids: row.ids,
+    ids: (row.ids || []).map((x) => (typeof x === "string" ? { id: x, rank: null } : x)),
+    cancelled: !!row.cancelled,
     ts: Number(row.ts),
   };
 }
@@ -152,20 +154,55 @@ export async function recordEventAccess(userId, eventCode) {
 }
 
 export async function addBuyerDB(eventCode, userId, buyer) {
-  const { error } = await supabase.from("buyers").insert({
-    event_code: eventCode,
-    user_id: userId,
-    name: buyer.name,
-    phone: buyer.phone,
-    qty: buyer.qty,
-    operator: buyer.operator,
-    tier_id: buyer.tierId,
-    tier_name: buyer.tierName,
-    unit_price: buyer.unitPrice,
-    ids: buyer.ids,
-    ts: buyer.ts,
+  const { data, error } = await supabase.rpc("record_purchase", {
+    p_event_code: eventCode,
+    p_name: buyer.name,
+    p_phone: buyer.phone,
+    p_qty: buyer.qty,
+    p_operator: buyer.operator,
+    p_tier_id: buyer.tierId,
+    p_tier_name: buyer.tierName,
+    p_unit_price: buyer.unitPrice,
+    p_ticket_ids: buyer.ids,
+    p_ts: buyer.ts,
   });
   if (error) throw error;
+  return data; // [{ id, rank }, ...]
+}
+
+/* ---------- Remboursements ---------- */
+export async function requestRefundDB(buyerId, eventCode, userId) {
+  const { error } = await supabase.from("refund_requests").insert({
+    buyer_id: buyerId,
+    event_code: eventCode,
+    user_id: userId,
+    requested_at: Date.now(),
+  });
+  if (error) throw error;
+}
+
+export async function fetchMyRefundRequestsDB(userId) {
+  const { data, error } = await supabase.from("refund_requests").select("*").eq("user_id", userId);
+  if (error) throw error;
+  return (data || []).map((r) => ({ id: r.id, buyerId: r.buyer_id, eventCode: r.event_code, status: r.status, requestedAt: Number(r.requested_at) }));
+}
+
+export async function fetchRefundRequestsDB(eventCode) {
+  const { data, error } = await supabase.from("refund_requests").select("*").eq("event_code", eventCode).eq("status", "pending");
+  if (error) throw error;
+  return (data || []).map((r) => ({ id: r.id, buyerId: r.buyer_id, eventCode: r.event_code, userId: r.user_id, requestedAt: Number(r.requested_at) }));
+}
+
+export async function resolveRefundDB(requestId, buyerId, approve) {
+  if (approve) {
+    const { error: e1 } = await supabase.from("buyers").update({ cancelled: true }).eq("id", buyerId);
+    if (e1) throw e1;
+  }
+  const { error: e2 } = await supabase
+    .from("refund_requests")
+    .update({ status: approve ? "approved" : "rejected", resolved_at: Date.now() })
+    .eq("id", requestId);
+  if (e2) throw e2;
 }
 
 /* ---------- Super admin ---------- */

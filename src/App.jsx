@@ -2,6 +2,7 @@ import React, { useState, useEffect, useCallback, useRef } from "react";
 import QRCode from "qrcode";
 import jsQR from "jsqr";
 import { toPng } from "html-to-image";
+import jsPDF from "jspdf";
 import {
   fetchOrganizerEvents,
   fetchClientEvents,
@@ -21,6 +22,10 @@ import {
   tryAdmitSelfDB,
   leaveQueueDB,
   fetchQueueCountDB,
+  requestRefundDB,
+  fetchRefundRequestsDB,
+  fetchMyRefundRequestsDB,
+  resolveRefundDB,
 } from "./lib/db";
 import { getSessionProfile, signUp, signIn, signOut } from "./lib/auth";
 
@@ -112,10 +117,11 @@ const codeFromPath = () => {
   return m ? m[1].toUpperCase() : null;
 };
 
-const tierSold = (ev, tierId) => ev.buyers.filter((b) => b.tierId === tierId).reduce((s, b) => s + b.qty, 0);
-const totalSold = (ev) => ev.buyers.reduce((s, b) => s + b.qty, 0);
+const activeBuyers = (ev) => ev.buyers.filter((b) => !b.cancelled);
+const tierSold = (ev, tierId) => activeBuyers(ev).filter((b) => b.tierId === tierId).reduce((s, b) => s + b.qty, 0);
+const totalSold = (ev) => activeBuyers(ev).reduce((s, b) => s + b.qty, 0);
 const totalCap = (ev) => ev.tiers.reduce((s, t) => s + t.capacity, 0);
-const revenue = (ev) => ev.buyers.reduce((s, b) => s + b.qty * b.unitPrice, 0);
+const revenue = (ev) => activeBuyers(ev).reduce((s, b) => s + b.qty * b.unitPrice, 0);
 const withdrawnTotal = (ev) => (ev.withdrawals || []).reduce((s, w) => s + w.amount, 0);
 const availableFunds = (ev) => revenue(ev) * 0.95 - withdrawnTotal(ev);
 
@@ -526,10 +532,11 @@ function TierSplit({ ev }) {
 }
 
 /* ---------- Carte billet (téléchargeable, QR réel) ---------- */
-function TicketCard({ t, i = 0, muted = false }) {
+function TicketCard({ t, i = 0, muted = false, refundStatus, onRequestRefund }) {
   const cardRef = useRef(null);
-  const dlBtnRef = useRef(null);
+  const actionsRef = useRef(null);
   const [downloading, setDownloading] = useState(false);
+  const [requesting, setRequesting] = useState(false);
 
   const download = async () => {
     if (!cardRef.current || downloading) return;
@@ -539,12 +546,17 @@ function TicketCard({ t, i = 0, muted = false }) {
         pixelRatio: 2,
         backgroundColor: "#FFFFFF",
         cacheBust: true,
-        filter: (node) => node !== dlBtnRef.current,
+        filter: (node) => node !== actionsRef.current,
       });
-      const a = document.createElement("a");
-      a.href = dataUrl;
-      a.download = `tike-${t.id}.png`;
-      a.click();
+      const img = new Image();
+      await new Promise((resolve, reject) => {
+        img.onload = resolve;
+        img.onerror = reject;
+        img.src = dataUrl;
+      });
+      const pdf = new jsPDF({ unit: "px", format: [img.width, img.height] });
+      pdf.addImage(dataUrl, "PNG", 0, 0, img.width, img.height);
+      pdf.save(`tike-${t.id}.pdf`);
     } catch (e) {
       console.error(e);
     } finally {
@@ -552,13 +564,34 @@ function TicketCard({ t, i = 0, muted = false }) {
     }
   };
 
+  const requestRefund = async () => {
+    setRequesting(true);
+    await onRequestRefund();
+    setRequesting(false);
+  };
+
+  const statusLabel = t.cancelled
+    ? "Billet annulé"
+    : muted
+    ? "Événement passé"
+    : "Billet valide";
+  const statusColor = t.cancelled ? C.pink : C.amber;
+
   return (
     <Reveal i={i}>
-      <div ref={cardRef} className="tk-lift" style={{ ...S.card, padding: 0, overflow: "hidden", opacity: muted ? 0.6 : 1 }}>
+      <div ref={cardRef} className="tk-lift" style={{ ...S.card, padding: 0, overflow: "hidden", opacity: muted || t.cancelled ? 0.65 : 1 }}>
+        {t.posterUrl && (
+          <img
+            crossOrigin="anonymous"
+            src={t.posterUrl}
+            alt=""
+            style={{ width: "100%", height: 110, objectFit: "cover", display: "block" }}
+          />
+        )}
         <div style={{ padding: "18px 20px 16px" }}>
-          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-            <div style={{ fontSize: 11, letterSpacing: 2, textTransform: "uppercase", color: C.amber, fontWeight: 700 }}>
-              {muted ? "Événement passé" : "Billet valide"}
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10 }}>
+            <div style={{ fontSize: 11, letterSpacing: 2, textTransform: "uppercase", color: statusColor, fontWeight: 700 }}>
+              {statusLabel}
             </div>
             <div
               style={{
@@ -571,6 +604,7 @@ function TicketCard({ t, i = 0, muted = false }) {
                 padding: "4px 10px",
                 letterSpacing: 1,
                 textTransform: "uppercase",
+                whiteSpace: "nowrap",
               }}
             >
               {t.tierName}
@@ -581,6 +615,18 @@ function TicketCard({ t, i = 0, muted = false }) {
             {t.date} à {t.time} · {t.venue}, {t.city}
             <br />
             Titulaire : <b style={{ color: C.text }}>{t.buyerName}</b>
+            {t.rank != null && (
+              <>
+                {" · "}
+                <b style={{ color: C.text }}>N°{t.rank}</b>
+              </>
+            )}
+            {t.momoNumber && (
+              <>
+                <br />
+                Organisateur : <b style={{ color: C.text }}>{t.momoNumber}</b>
+              </>
+            )}
           </div>
         </div>
         <Perf />
@@ -591,27 +637,66 @@ function TicketCard({ t, i = 0, muted = false }) {
           </div>
           <TicketQR value={t.id} size={66} />
         </div>
-        <button
-          ref={dlBtnRef}
-          onClick={download}
-          disabled={downloading}
-          className="tk-press"
-          style={{
-            width: "100%",
-            boxSizing: "border-box",
-            background: C.surface2,
-            border: "none",
-            borderTop: `1px solid ${C.line}`,
-            color: C.text,
-            padding: "12px 18px",
-            fontSize: 13.5,
-            fontWeight: 700,
-            cursor: "pointer",
-            fontFamily: "'Space Grotesk', sans-serif",
-          }}
-        >
-          {downloading ? "Préparation…" : "⬇ Télécharger le billet"}
-        </button>
+        <div ref={actionsRef}>
+          <button
+            onClick={download}
+            disabled={downloading}
+            className="tk-press"
+            style={{
+              width: "100%",
+              boxSizing: "border-box",
+              background: C.surface2,
+              border: "none",
+              borderTop: `1px solid ${C.line}`,
+              color: C.text,
+              padding: "12px 18px",
+              fontSize: 13.5,
+              fontWeight: 700,
+              cursor: "pointer",
+              fontFamily: "'Space Grotesk', sans-serif",
+            }}
+          >
+            {downloading ? "Préparation…" : "⬇ Télécharger le billet (PDF)"}
+          </button>
+          {!muted && !t.cancelled && onRequestRefund && (
+            <>
+              {refundStatus === "pending" ? (
+                <div
+                  style={{
+                    padding: "10px 18px",
+                    fontSize: 12.5,
+                    color: C.muted,
+                    textAlign: "center",
+                    borderTop: `1px solid ${C.line}`,
+                  }}
+                >
+                  Demande de remboursement en cours de traitement
+                </div>
+              ) : (
+                <button
+                  onClick={requestRefund}
+                  disabled={requesting}
+                  className="tk-press"
+                  style={{
+                    width: "100%",
+                    boxSizing: "border-box",
+                    background: "transparent",
+                    border: "none",
+                    borderTop: `1px solid ${C.line}`,
+                    color: C.pink,
+                    padding: "12px 18px",
+                    fontSize: 13.5,
+                    fontWeight: 700,
+                    cursor: "pointer",
+                    fontFamily: "'Space Grotesk', sans-serif",
+                  }}
+                >
+                  {requesting ? "…" : refundStatus === "rejected" ? "Demande refusée — réessayer" : "Demander un remboursement"}
+                </button>
+              )}
+            </>
+          )}
+        </div>
       </div>
     </Reveal>
   );
@@ -938,10 +1023,7 @@ export default function TikeApp() {
                     notify("Échec de l'enregistrement du paiement — réessaie.");
                     return;
                   }
-                  setEvents((prev) => ({
-                    ...prev,
-                    [ev.code]: { ...prev[ev.code], buyers: [...prev[ev.code].buyers, buyer] },
-                  }));
+                  await loadClientEvents(profile.id);
                   setView("clientDash");
                   notify("Paiement confirmé — billets reçus 🎟️");
                 }}
@@ -1606,6 +1688,9 @@ function NewEvent({ profile, onBack, onCreate }) {
 function CreatorEvent({ ev, onBack, onScan, notify, onWithdraw }) {
   const [withdrawing, setWithdrawing] = useState(false);
   const [queueCount, setQueueCount] = useState(null);
+  const [refunds, setRefunds] = useState([]);
+  const [resolvingId, setResolvingId] = useState(null);
+
   useEffect(() => {
     if (!ev.queueEnabled) return;
     let cancelled = false;
@@ -1617,6 +1702,31 @@ function CreatorEvent({ ev, onBack, onScan, notify, onWithdraw }) {
       clearInterval(id);
     };
   }, [ev.code, ev.queueEnabled]);
+
+  const loadRefunds = useCallback(() => {
+    fetchRefundRequestsDB(ev.code)
+      .then(setRefunds)
+      .catch((e) => console.error(e));
+  }, [ev.code]);
+  useEffect(() => {
+    loadRefunds();
+    const id = setInterval(loadRefunds, 8000);
+    return () => clearInterval(id);
+  }, [loadRefunds]);
+
+  const resolveRefund = async (req, approve) => {
+    setResolvingId(req.id);
+    try {
+      await resolveRefundDB(req.id, req.buyerId, approve);
+      setRefunds((prev) => prev.filter((r) => r.id !== req.id));
+      notify(approve ? "Billet annulé et remboursement approuvé." : "Demande refusée.");
+    } catch (e) {
+      console.error(e);
+      notify("Échec de l'opération — réessaie.");
+    } finally {
+      setResolvingId(null);
+    }
+  };
   const link = `${window.location.origin}/e/${ev.code}`;
   const rev = revenue(ev);
   const sold = totalSold(ev);
@@ -1824,8 +1934,78 @@ function CreatorEvent({ ev, onBack, onScan, notify, onWithdraw }) {
         </div>
       </Reveal>
 
+      {/* Demandes de remboursement */}
+      {refunds.length > 0 && (
+        <Reveal i={7}>
+          <div style={{ ...S.card, marginBottom: 14 }}>
+            <div style={{ ...S.label, marginBottom: 4 }}>Demandes de remboursement ({refunds.length})</div>
+            {refunds.map((r, i) => {
+              const b = ev.buyers.find((x) => x.id === r.buyerId);
+              return (
+                <div
+                  key={r.id}
+                  style={{
+                    display: "flex",
+                    alignItems: "center",
+                    gap: 10,
+                    padding: "12px 0",
+                    borderBottom: i < refunds.length - 1 ? `1px solid ${C.line}` : "none",
+                  }}
+                >
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ fontWeight: 700, fontSize: 14 }}>{b ? b.name : "Commande"}</div>
+                    <div style={{ color: C.muted, fontSize: 12 }}>
+                      {b ? `${b.qty} × ${b.tierName} · ${fmtFCFA(b.qty * b.unitPrice)}` : "Détails indisponibles"}
+                    </div>
+                  </div>
+                  <button
+                    className="tk-press"
+                    disabled={resolvingId === r.id}
+                    onClick={() => resolveRefund(r, true)}
+                    style={{
+                      background: C.pink,
+                      border: "none",
+                      color: "#FFFFFF",
+                      borderRadius: 8,
+                      padding: "7px 10px",
+                      fontSize: 12,
+                      fontWeight: 700,
+                      cursor: "pointer",
+                      fontFamily: "'Space Grotesk', sans-serif",
+                      opacity: resolvingId === r.id ? 0.5 : 1,
+                      whiteSpace: "nowrap",
+                    }}
+                  >
+                    Annuler + rembourser
+                  </button>
+                  <button
+                    className="tk-press"
+                    disabled={resolvingId === r.id}
+                    onClick={() => resolveRefund(r, false)}
+                    style={{
+                      background: "transparent",
+                      border: `1px solid ${C.line}`,
+                      color: C.text,
+                      borderRadius: 8,
+                      padding: "7px 10px",
+                      fontSize: 12,
+                      fontWeight: 700,
+                      cursor: "pointer",
+                      fontFamily: "'Space Grotesk', sans-serif",
+                      opacity: resolvingId === r.id ? 0.5 : 1,
+                    }}
+                  >
+                    Refuser
+                  </button>
+                </div>
+              );
+            })}
+          </div>
+        </Reveal>
+      )}
+
       {/* Acheteurs */}
-      <Reveal i={7}>
+      <Reveal i={8}>
         <div style={S.card}>
           <div style={S.label}>Acheteurs ({ev.buyers.length})</div>
           {ev.buyers.length === 0 ? (
@@ -1843,10 +2023,18 @@ function CreatorEvent({ ev, onBack, onScan, notify, onWithdraw }) {
                     padding: "10px 0",
                     borderBottom: i < ev.buyers.length - 1 ? `1px solid ${C.line}` : "none",
                     fontSize: 14,
+                    opacity: b.cancelled ? 0.5 : 1,
                   }}
                 >
                   <div>
-                    <div style={{ fontWeight: 700 }}>{b.name}</div>
+                    <div style={{ fontWeight: 700 }}>
+                      {b.name}
+                      {b.cancelled && (
+                        <span style={{ color: C.pink, fontWeight: 700, fontSize: 11, marginLeft: 8, textTransform: "uppercase" }}>
+                          Annulé
+                        </span>
+                      )}
+                    </div>
                     <div style={{ color: C.muted, fontSize: 12.5 }}>
                       {b.phone} · {b.operator}
                     </div>
@@ -1887,7 +2075,8 @@ function Scanner({ ev, onBack, onMarkUsed }) {
 
   const findTicket = (id) => {
     for (const b of ev.buyers) {
-      if (b.ids.includes(id)) return { holder: b.name, phone: b.phone, tierName: b.tierName };
+      const entry = b.ids.find((x) => x.id === id);
+      if (entry) return { holder: b.name, phone: b.phone, tierName: b.tierName, rank: entry.rank, cancelled: b.cancelled };
     }
     return null;
   };
@@ -1901,6 +2090,7 @@ function Scanner({ ev, onBack, onMarkUsed }) {
       setTimeout(async () => {
         const ticket = findTicket(id);
         if (!ticket) setResult({ status: "fraud", id });
+        else if (ticket.cancelled) setResult({ status: "cancelled", id, ticket });
         else if (ev.used && ev.used[id]) setResult({ status: "used", id, ticket, usedAt: ev.used[id] });
         else {
           await onMarkUsed(id);
@@ -1978,6 +2168,7 @@ function Scanner({ ev, onBack, onMarkUsed }) {
     valid: { bg: "rgba(18,166,107,.12)", border: C.green, icon: "✅", title: "BILLET VALIDE", color: C.green },
     used: { bg: "rgba(255,122,26,.12)", border: C.amber, icon: "⚠️", title: "DÉJÀ UTILISÉ", color: C.amber },
     fraud: { bg: "rgba(255,61,104,.12)", border: C.pink, icon: "🚫", title: "BILLET INCONNU — FRAUDE POSSIBLE", color: C.pink },
+    cancelled: { bg: "rgba(255,61,104,.12)", border: C.pink, icon: "🚫", title: "BILLET ANNULÉ / REMBOURSÉ", color: C.pink },
   };
 
   return (
@@ -2126,6 +2317,13 @@ function Scanner({ ev, onBack, onMarkUsed }) {
               <span style={{ color: C.pink, fontWeight: 700 }}>🚫 Faux billet — refuser l'entrée.</span>
             </div>
           )}
+          {result.status === "cancelled" && (
+            <div style={{ fontSize: 14, lineHeight: 1.7 }}>
+              Billet de <b>{result.ticket.holder}</b> ({result.ticket.tierName}) — annulé et remboursé.
+              <br />
+              <span style={{ color: C.pink, fontWeight: 700 }}>🚫 Refuser l'entrée.</span>
+            </div>
+          )}
 
           <button className="tk-press" style={{ ...S.btn, marginTop: 16 }} onClick={reset}>
             Scanner le suivant
@@ -2141,6 +2339,37 @@ function ClientDash({ profile, events, onLogout, onOpenEvent, onOpenedNew, notif
   const [code, setCode] = useState("");
   const [err, setErr] = useState("");
   const [busy, setBusy] = useState(false);
+  const [tab, setTab] = useState("active");
+  const [refundMap, setRefundMap] = useState({});
+
+  const loadRefunds = useCallback(async () => {
+    try {
+      const reqs = await fetchMyRefundRequestsDB(profile.id);
+      const map = {};
+      for (const r of reqs) {
+        // La demande la plus récente par commande fait foi.
+        if (!map[r.buyerId] || r.requestedAt > map[r.buyerId].requestedAt) map[r.buyerId] = r;
+      }
+      setRefundMap(Object.fromEntries(Object.entries(map).map(([k, v]) => [k, v.status])));
+    } catch (e) {
+      console.error(e);
+    }
+  }, [profile.id]);
+
+  useEffect(() => {
+    loadRefunds();
+  }, [loadRefunds]);
+
+  const requestRefund = async (buyerId, eventCode) => {
+    try {
+      await requestRefundDB(buyerId, eventCode, profile.id);
+      await loadRefunds();
+      notify("Demande envoyée à l'organisateur.");
+    } catch (e) {
+      console.error(e);
+      notify("Échec de la demande — réessaie.");
+    }
+  };
 
   const list = Object.values(events).sort((a, b) => b.ts - a.ts);
   const now = new Date();
@@ -2148,15 +2377,20 @@ function ClientDash({ profile, events, onLogout, onOpenEvent, onOpenedNew, notif
   const allTickets = [];
   for (const e of list) {
     for (const b of e.buyers) {
-      for (const id of b.ids) {
+      for (const entry of b.ids) {
         allTickets.push({
-          id,
+          id: entry.id,
+          rank: entry.rank,
+          buyerId: b.id,
+          cancelled: b.cancelled,
           eventCode: e.code,
           eventName: e.name,
           date: e.date,
           time: e.time,
           venue: e.venue,
           city: e.city,
+          posterUrl: e.posterUrl,
+          momoNumber: e.momoNumber,
           tierName: b.tierName,
           buyerName: b.name,
           ts: b.ts,
@@ -2168,6 +2402,7 @@ function ClientDash({ profile, events, onLogout, onOpenEvent, onOpenedNew, notif
   allTickets.sort((a, b) => b.ts - a.ts);
   const active = allTickets.filter((t) => t.eventDate >= now);
   const history = allTickets.filter((t) => t.eventDate < now);
+  const shown = tab === "active" ? active : history;
 
   const openByCode = async () => {
     const clean = code.trim().toUpperCase().replace(/^HTTPS?:\/\/TIKE\.APP\/E\//, "");
@@ -2216,59 +2451,90 @@ function ClientDash({ profile, events, onLogout, onOpenEvent, onOpenedNew, notif
         </div>
       </Reveal>
 
-      {active.length > 0 && (
+      <Reveal i={1}>
+        <div style={{ display: "flex", gap: 8, marginBottom: 20 }}>
+          {[
+            { id: "active", label: `Billets en cours (${active.length})` },
+            { id: "history", label: `Historique (${history.length})` },
+          ].map((tb) => (
+            <button
+              key={tb.id}
+              onClick={() => setTab(tb.id)}
+              className="tk-press"
+              style={{
+                flex: 1,
+                padding: "10px 8px",
+                borderRadius: 10,
+                border: `1px solid ${C.line}`,
+                background: tab === tb.id ? C.amber : C.surface2,
+                color: tab === tb.id ? C.amberDark : C.text,
+                fontWeight: 700,
+                fontSize: 13,
+                cursor: "pointer",
+                fontFamily: "'Space Grotesk', sans-serif",
+              }}
+            >
+              {tb.label}
+            </button>
+          ))}
+        </div>
+      </Reveal>
+
+      {shown.length > 0 && (
         <div style={{ marginBottom: 20 }}>
-          <div style={{ ...S.label, marginBottom: 12 }}>Billets actifs ({active.length})</div>
           <div style={{ display: "grid", gap: 14 }}>
-            {active.map((t, i) => (
-              <TicketCard key={t.id} t={t} i={i} />
+            {shown.map((t, i) => (
+              <TicketCard
+                key={t.id}
+                t={t}
+                i={i}
+                muted={tab === "history"}
+                refundStatus={refundMap[t.buyerId]}
+                onRequestRefund={tab === "active" ? () => requestRefund(t.buyerId, t.eventCode) : undefined}
+              />
             ))}
           </div>
         </div>
       )}
 
-      {list.length > 0 ? (
-        <div style={{ marginBottom: 20 }}>
-          <div style={{ ...S.label, marginBottom: 12 }}>Mes événements</div>
-          <div style={{ display: "grid", gap: 12 }}>
-            {list.map((e, i) => (
-              <Reveal key={e.code} i={i}>
-                <button
-                  onClick={() => onOpenEvent(e.code)}
-                  className="tk-press tk-lift"
-                  style={{ ...S.card, textAlign: "left", cursor: "pointer", color: C.text, width: "100%" }}
-                >
-                  <div style={{ display: "flex", justifyContent: "space-between", gap: 10 }}>
-                    <div style={{ fontWeight: 700, fontSize: 15 }}>{e.name}</div>
-                    <div style={{ color: e.buyers.length ? C.green : C.muted, fontWeight: 700, fontSize: 12, whiteSpace: "nowrap" }}>
-                      {e.buyers.length ? "Billet acheté" : "Pas encore acheté"}
+      {tab === "active" &&
+        (list.length > 0 ? (
+          <div style={{ marginBottom: 20 }}>
+            <div style={{ ...S.label, marginBottom: 12 }}>Mes événements</div>
+            <div style={{ display: "grid", gap: 12 }}>
+              {list.map((e, i) => (
+                <Reveal key={e.code} i={i}>
+                  <button
+                    onClick={() => onOpenEvent(e.code)}
+                    className="tk-press tk-lift"
+                    style={{ ...S.card, textAlign: "left", cursor: "pointer", color: C.text, width: "100%" }}
+                  >
+                    <div style={{ display: "flex", justifyContent: "space-between", gap: 10 }}>
+                      <div style={{ fontWeight: 700, fontSize: 15 }}>{e.name}</div>
+                      <div style={{ color: e.buyers.length ? C.green : C.muted, fontWeight: 700, fontSize: 12, whiteSpace: "nowrap" }}>
+                        {e.buyers.length ? "Billet acheté" : "Pas encore acheté"}
+                      </div>
                     </div>
-                  </div>
-                  <div style={{ color: C.muted, fontSize: 13, marginTop: 4 }}>
-                    {e.date} · {e.venue}, {e.city}
-                  </div>
-                </button>
-              </Reveal>
-            ))}
+                    <div style={{ color: C.muted, fontSize: 13, marginTop: 4 }}>
+                      {e.date} · {e.venue}, {e.city}
+                    </div>
+                  </button>
+                </Reveal>
+              ))}
+            </div>
           </div>
-        </div>
-      ) : (
-        <Reveal i={1}>
-          <div style={{ ...S.card, textAlign: "center", color: C.muted, fontSize: 14 }}>
-            Aucun événement pour l'instant. Ouvre le lien reçu d'un organisateur pour commencer.
-          </div>
-        </Reveal>
-      )}
+        ) : (
+          <Reveal i={2}>
+            <div style={{ ...S.card, textAlign: "center", color: C.muted, fontSize: 14 }}>
+              Aucun événement pour l'instant. Ouvre le lien reçu d'un organisateur pour commencer.
+            </div>
+          </Reveal>
+        ))}
 
-      {history.length > 0 && (
-        <div>
-          <div style={{ ...S.label, marginBottom: 12 }}>Historique</div>
-          <div style={{ display: "grid", gap: 14 }}>
-            {history.map((t, i) => (
-              <TicketCard key={t.id} t={t} i={i} muted />
-            ))}
-          </div>
-        </div>
+      {tab === "history" && shown.length === 0 && (
+        <Reveal i={2}>
+          <div style={{ ...S.card, textAlign: "center", color: C.muted, fontSize: 14 }}>Aucun billet dans l'historique pour l'instant.</div>
+        </Reveal>
       )}
     </div>
   );
