@@ -39,7 +39,7 @@ function rowToBuyer(row) {
 }
 
 function rowToWithdrawal(row) {
-  return { id: row.id, amount: Number(row.amount), ts: Number(row.ts) };
+  return { id: row.id, amount: Number(row.amount), reason: row.reason, phone: row.phone, ts: Number(row.ts) };
 }
 
 async function assemble(eventRows, eventCodes) {
@@ -108,10 +108,15 @@ export async function markTicketUsedDB(eventCode, ticketId, ts) {
   if (error) throw error;
 }
 
-export async function withdrawFundsDB(eventCode, amount) {
-  // Le montant est recalculé et validé côté serveur (voir request_withdrawal) :
-  // celui envoyé ici n'est qu'une indication, jamais fait confiance tel quel.
-  const { data, error } = await supabase.rpc("request_withdrawal", { p_event_code: eventCode, p_amount: amount });
+export async function withdrawFundsDB(eventCode, amount, phone, reason) {
+  // Montant, numéro et raison sont revalidés côté serveur (voir request_withdrawal) :
+  // ce qui est envoyé ici n'est qu'une indication, jamais fait confiance tel quel.
+  const { data, error } = await supabase.rpc("request_withdrawal", {
+    p_event_code: eventCode,
+    p_amount: amount,
+    p_phone: phone,
+    p_reason: reason,
+  });
   if (error) throw error;
   return Number(data);
 }

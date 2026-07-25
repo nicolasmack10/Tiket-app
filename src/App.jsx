@@ -286,6 +286,43 @@ function LogoutButton({ onClick }) {
   );
 }
 
+function Modal({ title, onClose, children }) {
+  return (
+    <div
+      onClick={onClose}
+      style={{
+        position: "fixed",
+        inset: 0,
+        background: "rgba(28,21,51,.55)",
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        padding: 18,
+        zIndex: 100,
+        animation: "tk-fade-up .2s ease both",
+      }}
+    >
+      <div
+        onClick={(e) => e.stopPropagation()}
+        style={{ ...S.card, width: "100%", maxWidth: 420, maxHeight: "88vh", overflowY: "auto", animation: "tk-pop .25s cubic-bezier(.22,1,.36,1) both" }}
+      >
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
+          <div style={{ fontFamily: "'Unbounded', sans-serif", fontWeight: 700, fontSize: 16 }}>{title}</div>
+          <button
+            onClick={onClose}
+            aria-label="Fermer"
+            className="tk-press"
+            style={{ background: "transparent", border: "none", fontSize: 22, lineHeight: 1, cursor: "pointer", color: C.muted, padding: 4 }}
+          >
+            ×
+          </button>
+        </div>
+        {children}
+      </div>
+    </div>
+  );
+}
+
 function Perf() {
   return (
     <div style={{ position: "relative", height: 0 }}>
@@ -857,9 +894,13 @@ export default function TikeApp() {
                   setPendingRole(role);
                   setView("auth");
                 }}
+                onNav={setView}
               />
             )}
             {view === "auth" && <Auth role={pendingRole} onBack={() => setView("home")} onDone={handleAuthDone} />}
+            {view === "faq" && <FAQ onBack={() => setView("home")} />}
+            {view === "about" && <About onBack={() => setView("home")} />}
+            {view === "contact" && <Contact onBack={() => setView("home")} />}
 
             {view === "cDash" && profile && (
               <CreatorDash
@@ -898,20 +939,17 @@ export default function TikeApp() {
                 onBack={() => setView("cDash")}
                 onScan={() => setView("cScan")}
                 notify={notify}
-                onWithdraw={async (amount) => {
-                  let actual;
-                  try {
-                    actual = await withdrawFundsDB(ev.code, amount);
-                  } catch (err) {
-                    console.error(err);
-                    notify(err.message || "Échec du retrait — réessaie.");
-                    return;
-                  }
+                onWithdraw={async (amount, phone, reason) => {
+                  const actual = await withdrawFundsDB(ev.code, amount, phone, reason);
                   setEvents((prev) => ({
                     ...prev,
-                    [ev.code]: { ...prev[ev.code], withdrawals: [...prev[ev.code].withdrawals, { amount: actual, ts: Date.now() }] },
+                    [ev.code]: {
+                      ...prev[ev.code],
+                      withdrawals: [...prev[ev.code].withdrawals, { amount: actual, phone, reason, ts: Date.now() }],
+                    },
                   }));
                   notify("Fonds retirés !");
+                  return actual;
                 }}
               />
             )}
@@ -1059,7 +1097,7 @@ export default function TikeApp() {
 }
 
 /* ============================ Accueil ============================ */
-function Home({ onPickRole }) {
+function Home({ onPickRole, onNav }) {
   return (
     <div>
       <Reveal i={0}>
@@ -1110,7 +1148,161 @@ function Home({ onPickRole }) {
           </button>
         </Reveal>
       </div>
+
+      <Reveal i={3}>
+        <div style={{ display: "flex", justifyContent: "center", gap: 18, marginTop: 34, flexWrap: "wrap" }}>
+          {[
+            { id: "faq", label: "FAQ" },
+            { id: "about", label: "À propos" },
+            { id: "contact", label: "Nous contacter" },
+          ].map((p) => (
+            <button
+              key={p.id}
+              onClick={() => onNav(p.id)}
+              className="tk-press"
+              style={{
+                background: "none",
+                border: "none",
+                color: C.muted,
+                fontSize: 13,
+                fontWeight: 700,
+                cursor: "pointer",
+                fontFamily: "'Space Grotesk', sans-serif",
+                textDecoration: "underline",
+                textUnderlineOffset: 3,
+              }}
+            >
+              {p.label}
+            </button>
+          ))}
+        </div>
+      </Reveal>
     </div>
+  );
+}
+
+/* ============================ Pages statiques ============================ */
+function StaticPage({ title, onBack, children }) {
+  return (
+    <div>
+      <Top title={title} onBack={onBack} />
+      <Reveal i={0}>
+        <div style={S.card}>{children}</div>
+      </Reveal>
+    </div>
+  );
+}
+
+function FAQItem({ q, children, i }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <Reveal i={i}>
+      <div style={{ borderBottom: `1px solid ${C.line}`, padding: "14px 0" }}>
+        <button
+          onClick={() => setOpen((v) => !v)}
+          className="tk-press"
+          style={{
+            width: "100%",
+            background: "none",
+            border: "none",
+            padding: 0,
+            display: "flex",
+            justifyContent: "space-between",
+            alignItems: "center",
+            gap: 10,
+            cursor: "pointer",
+            textAlign: "left",
+            color: C.text,
+            fontFamily: "'Space Grotesk', sans-serif",
+          }}
+        >
+          <span style={{ fontWeight: 700, fontSize: 14.5 }}>{q}</span>
+          <span style={{ color: C.amber, fontSize: 18, flexShrink: 0, transform: open ? "rotate(45deg)" : "none", transition: "transform .2s ease" }}>
+            +
+          </span>
+        </button>
+        {open && <div style={{ color: C.muted, fontSize: 13.5, lineHeight: 1.7, marginTop: 10 }}>{children}</div>}
+      </div>
+    </Reveal>
+  );
+}
+
+function FAQ({ onBack }) {
+  return (
+    <StaticPage title="Foire aux questions" onBack={onBack}>
+      <FAQItem i={0} q="Comment acheter un billet ?">
+        Un organisateur te partage un lien unique (WhatsApp, Facebook…). En l'ouvrant, tu crées ou utilises ton compte
+        client, tu choisis ta catégorie de billet, puis tu payes par mobile money. Ton billet est disponible
+        immédiatement avec un QR code unique.
+      </FAQItem>
+      <FAQItem i={1} q="Le paiement mobile money est-il sécurisé ?">
+        Le paiement se fait via une demande envoyée à ton opérateur (MTN MoMo ou Airtel Money) que tu valides toi-même
+        avec ton code PIN. TIKÉ ne stocke jamais ton code PIN ni tes identifiants mobile money.
+      </FAQItem>
+      <FAQItem i={2} q="Puis-je me faire rembourser ?">
+        Tu peux faire une demande de remboursement directement depuis un billet actif. Seul l'organisateur de
+        l'événement peut approuver ou refuser cette demande — TIKÉ ne décide pas à sa place.
+      </FAQItem>
+      <FAQItem i={3} q="Comment fonctionne la file d'attente virtuelle ?">
+        Pour les événements à forte demande, l'organisateur peut activer une salle d'attente : tu patientes en ligne
+        et es admis au paiement automatiquement, un par un, dans l'ordre d'arrivée.
+      </FAQItem>
+      <FAQItem i={4} q="Je suis organisateur, comment je récupère mes fonds ?">
+        Depuis le tableau de bord de ton événement, tu peux retirer les fonds disponibles (revenus moins la
+        commission de 5%) vers ton numéro mobile money. Chaque retrait demande une raison et une confirmation, et
+        reste consultable dans un historique permanent.
+      </FAQItem>
+      <FAQItem i={5} q="Mes billets sont-ils protégés contre la fraude ?">
+        Chaque billet a un QR code unique et un numéro de rang (N°...). À l'entrée, l'organisateur scanne le billet
+        avec la caméra : un billet déjà utilisé, annulé ou inconnu est immédiatement signalé.
+      </FAQItem>
+    </StaticPage>
+  );
+}
+
+function About({ onBack }) {
+  return (
+    <StaticPage title="À propos de nous" onBack={onBack}>
+      <div style={{ color: C.text, fontSize: 14.5, lineHeight: 1.8 }}>
+        <p style={{ marginTop: 0 }}>
+          <b>TIKÉ</b> est une billetterie pensée pour les organisateurs d'événements en Afrique centrale : pas de
+          vitrine publique à parcourir, juste un lien à partager sur WhatsApp ou Facebook et un paiement mobile
+          money simple pour tes invités.
+        </p>
+        <p>
+          Notre objectif : donner aux artistes, DJ et organisateurs indépendants les mêmes outils que les grandes
+          plateformes de billetterie — vente en ligne, contrôle d'entrée anti-fraude, tableau de bord de revenus,
+          file d'attente pour les fortes demandes — sans complexité ni frais cachés.
+        </p>
+        <p style={{ marginBottom: 0 }}>Une commission unique de 5% est prélevée sur les ventes, rien de plus.</p>
+      </div>
+    </StaticPage>
+  );
+}
+
+function Contact({ onBack }) {
+  return (
+    <StaticPage title="Nous contacter" onBack={onBack}>
+      <div style={{ color: C.muted, fontSize: 14, lineHeight: 1.7, marginBottom: 18 }}>
+        Une question, un souci avec un billet ou un événement ? Écris-nous.
+      </div>
+      <a
+        href="mailto:nicolas.mack10@gmail.com"
+        className="tk-press"
+        style={{ ...S.card, display: "block", textDecoration: "none", color: C.text, marginBottom: 12 }}
+      >
+        <div style={{ fontSize: 11, color: C.muted, letterSpacing: 1, textTransform: "uppercase", fontWeight: 700 }}>Email</div>
+        <div style={{ fontWeight: 700, fontSize: 15, marginTop: 4 }}>nicolas.mack10@gmail.com</div>
+      </a>
+      <a
+        href="tel:+242066820530"
+        className="tk-press"
+        style={{ ...S.card, display: "block", textDecoration: "none", color: C.text }}
+      >
+        <div style={{ fontSize: 11, color: C.muted, letterSpacing: 1, textTransform: "uppercase", fontWeight: 700 }}>Téléphone</div>
+        <div style={{ fontWeight: 700, fontSize: 15, marginTop: 4 }}>+242 06 682 05 30</div>
+      </a>
+    </StaticPage>
   );
 }
 
@@ -1688,6 +1880,10 @@ function NewEvent({ profile, onBack, onCreate }) {
 /* ---------- TABLEAU DE BORD ÉVÉNEMENT ---------- */
 function CreatorEvent({ ev, onBack, onScan, notify, onWithdraw }) {
   const [withdrawing, setWithdrawing] = useState(false);
+  const [withdrawModal, setWithdrawModal] = useState(null); // null | "form" | "confirm"
+  const [wPhone, setWPhone] = useState("");
+  const [wReason, setWReason] = useState("");
+  const [wErr, setWErr] = useState("");
   const [queueCount, setQueueCount] = useState(null);
   const [refunds, setRefunds] = useState([]);
   const [resolvingId, setResolvingId] = useState(null);
@@ -1752,11 +1948,44 @@ function CreatorEvent({ ev, onBack, onScan, notify, onWithdraw }) {
     }
   };
 
+  const normPhone = (s) => (s || "").replace(/\D/g, "");
+
+  const openWithdraw = () => {
+    if (available <= 0) return;
+    setWPhone("");
+    setWReason("");
+    setWErr("");
+    setWithdrawModal("form");
+  };
+
+  const toConfirm = () => {
+    setWErr("");
+    if (!wReason.trim()) {
+      setWErr("Indique une raison pour ce retrait.");
+      return;
+    }
+    if (!wPhone.trim()) {
+      setWErr("Indique le numéro mobile money.");
+      return;
+    }
+    if (normPhone(wPhone) !== normPhone(ev.momoNumber)) {
+      setWErr("Ce numéro ne correspond pas à celui renseigné à la création de l'événement.");
+      return;
+    }
+    setWithdrawModal("confirm");
+  };
+
   const doWithdraw = async () => {
-    if (available <= 0 || withdrawing) return;
     setWithdrawing(true);
-    await onWithdraw(available);
-    setWithdrawing(false);
+    setWErr("");
+    try {
+      await onWithdraw(available, wPhone.trim(), wReason.trim());
+      setWithdrawModal(null);
+    } catch (e) {
+      setWErr(e.message || "Échec du retrait — réessaie.");
+    } finally {
+      setWithdrawing(false);
+    }
   };
 
   const priceLine = ev.tiers.map((t) => `${t.name} ${fmtFCFA(t.price)}`).join(" · ");
@@ -1840,18 +2069,103 @@ function CreatorEvent({ ev, onBack, onScan, notify, onWithdraw }) {
             </div>
             <button
               className="tk-press"
-              style={{ ...S.btn, width: "auto", padding: "13px 20px", opacity: available > 0 && !withdrawing ? 1 : 0.4 }}
-              disabled={available <= 0 || withdrawing}
-              onClick={doWithdraw}
+              style={{ ...S.btn, width: "auto", padding: "13px 20px", opacity: available > 0 ? 1 : 0.4 }}
+              disabled={available <= 0}
+              onClick={openWithdraw}
             >
-              {withdrawing ? "…" : "Retirer"}
+              Retirer
             </button>
           </div>
-          {withdrawn > 0 && (
-            <div style={{ color: C.muted, fontSize: 12, marginTop: 10 }}>{fmtFCFA(withdrawn)} déjà retirés sur cet événement.</div>
+          {ev.withdrawals.length > 0 && (
+            <div style={{ marginTop: 12, paddingTop: 12, borderTop: `1px solid ${C.line}` }}>
+              <div style={{ color: C.muted, fontSize: 12, marginBottom: 8 }}>
+                {fmtFCFA(withdrawn)} déjà retirés · historique ({ev.withdrawals.length})
+              </div>
+              {ev.withdrawals
+                .slice()
+                .sort((a, b) => b.ts - a.ts)
+                .map((w, i) => (
+                  <div
+                    key={w.id ?? i}
+                    style={{
+                      display: "flex",
+                      justifyContent: "space-between",
+                      gap: 10,
+                      padding: "8px 0",
+                      borderBottom: i < ev.withdrawals.length - 1 ? `1px solid ${C.line}` : "none",
+                      fontSize: 12.5,
+                    }}
+                  >
+                    <div style={{ minWidth: 0 }}>
+                      <div style={{ color: C.text, fontWeight: 700 }}>{w.reason || "—"}</div>
+                      <div style={{ color: C.muted }}>
+                        {new Date(w.ts).toLocaleDateString("fr-FR", { day: "2-digit", month: "short", year: "numeric" })}
+                        {w.phone ? ` · ${w.phone}` : ""}
+                      </div>
+                    </div>
+                    <div style={{ color: C.amber, fontWeight: 700, whiteSpace: "nowrap" }}>{fmtFCFA(w.amount)}</div>
+                  </div>
+                ))}
+            </div>
           )}
         </div>
       </Reveal>
+
+      {withdrawModal && (
+        <Modal title={withdrawModal === "form" ? "Retirer des fonds" : "Confirmer le retrait"} onClose={() => (withdrawing ? null : setWithdrawModal(null))}>
+          {withdrawModal === "form" && (
+            <>
+              <div style={{ color: C.muted, fontSize: 13, marginBottom: 14, lineHeight: 1.5 }}>
+                Montant disponible : <b style={{ color: C.text }}>{fmtFCFA(available)}</b>
+              </div>
+              <label style={S.label}>Raison du retrait</label>
+              <textarea
+                style={{ ...S.input, minHeight: 60, resize: "vertical" }}
+                value={wReason}
+                onChange={(e) => setWReason(e.target.value)}
+                placeholder="Ex. Frais de salle, cachets artistes…"
+              />
+              <label style={S.label}>Numéro mobile money</label>
+              <input
+                style={S.input}
+                value={wPhone}
+                onChange={(e) => setWPhone(e.target.value)}
+                placeholder={ev.momoNumber || "06 XXX XX XX"}
+                inputMode="tel"
+              />
+              <div style={{ color: C.muted, fontSize: 12, marginTop: -6, marginBottom: 14, lineHeight: 1.5 }}>
+                Doit correspondre au numéro renseigné à la création de l'événement.
+              </div>
+              {wErr && <div style={{ color: C.pink, fontSize: 13, marginBottom: 12 }}>{wErr}</div>}
+              <button className="tk-press" style={S.btn} onClick={toConfirm}>
+                Continuer
+              </button>
+            </>
+          )}
+          {withdrawModal === "confirm" && (
+            <>
+              <div style={{ color: C.text, fontSize: 14.5, lineHeight: 1.7, marginBottom: 18 }}>
+                Tu es sur le point de retirer <b style={{ color: C.amber }}>{fmtFCFA(available)}</b> vers le numéro{" "}
+                <b>{wPhone}</b>.
+                <br />
+                Raison : <b>{wReason}</b>
+              </div>
+              {wErr && <div style={{ color: C.pink, fontSize: 13, marginBottom: 12 }}>{wErr}</div>}
+              <button className="tk-press" style={{ ...S.btn, opacity: withdrawing ? 0.6 : 1 }} disabled={withdrawing} onClick={doWithdraw}>
+                {withdrawing ? "Retrait en cours…" : "Confirmer le retrait"}
+              </button>
+              <button
+                className="tk-press"
+                style={{ ...S.btnGhost, marginTop: 10 }}
+                disabled={withdrawing}
+                onClick={() => setWithdrawModal("form")}
+              >
+                Retour
+              </button>
+            </>
+          )}
+        </Modal>
+      )}
 
       {/* Lien de partage */}
       <Reveal i={3}>
