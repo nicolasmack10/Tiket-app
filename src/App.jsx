@@ -899,16 +899,17 @@ export default function TikeApp() {
                 onScan={() => setView("cScan")}
                 notify={notify}
                 onWithdraw={async (amount) => {
+                  let actual;
                   try {
-                    await withdrawFundsDB(ev.code, amount);
+                    actual = await withdrawFundsDB(ev.code, amount);
                   } catch (err) {
                     console.error(err);
-                    notify("Échec du retrait — réessaie.");
+                    notify(err.message || "Échec du retrait — réessaie.");
                     return;
                   }
                   setEvents((prev) => ({
                     ...prev,
-                    [ev.code]: { ...prev[ev.code], withdrawals: [...prev[ev.code].withdrawals, { amount, ts: Date.now() }] },
+                    [ev.code]: { ...prev[ev.code], withdrawals: [...prev[ev.code].withdrawals, { amount: actual, ts: Date.now() }] },
                   }));
                   notify("Fonds retirés !");
                 }}

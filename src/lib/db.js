@@ -109,12 +109,11 @@ export async function markTicketUsedDB(eventCode, ticketId, ts) {
 }
 
 export async function withdrawFundsDB(eventCode, amount) {
-  const { error } = await supabase.from("withdrawals").insert({
-    event_code: eventCode,
-    amount,
-    ts: Date.now(),
-  });
+  // Le montant est recalculé et validé côté serveur (voir request_withdrawal) :
+  // celui envoyé ici n'est qu'une indication, jamais fait confiance tel quel.
+  const { data, error } = await supabase.rpc("request_withdrawal", { p_event_code: eventCode, p_amount: amount });
   if (error) throw error;
+  return Number(data);
 }
 
 /* ---------- Client ---------- */
