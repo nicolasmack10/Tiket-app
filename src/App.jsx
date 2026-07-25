@@ -122,8 +122,12 @@ const tierSold = (ev, tierId) => activeBuyers(ev).filter((b) => b.tierId === tie
 const totalSold = (ev) => activeBuyers(ev).reduce((s, b) => s + b.qty, 0);
 const totalCap = (ev) => ev.tiers.reduce((s, t) => s + t.capacity, 0);
 const revenue = (ev) => activeBuyers(ev).reduce((s, b) => s + b.qty * b.unitPrice, 0);
+// Commission variable selon le prix du billet : 0–5000 FCFA = 10%, 5001+ FCFA = 20%.
+const commissionRate = (unitPrice) => (unitPrice <= 5000 ? 0.1 : 0.2);
+const commissionAmount = (ev) => activeBuyers(ev).reduce((s, b) => s + b.qty * b.unitPrice * commissionRate(b.unitPrice), 0);
+const netRevenue = (ev) => revenue(ev) - commissionAmount(ev);
 const withdrawnTotal = (ev) => (ev.withdrawals || []).reduce((s, w) => s + w.amount, 0);
-const availableFunds = (ev) => revenue(ev) * 0.95 - withdrawnTotal(ev);
+const availableFunds = (ev) => netRevenue(ev) - withdrawnTotal(ev);
 
 /* ---------- Hooks ---------- */
 function useCountUp(target, duration = 900) {
@@ -1249,10 +1253,13 @@ function FAQ({ onBack }) {
       </FAQItem>
       <FAQItem i={4} q="Je suis organisateur, comment je récupère mes fonds ?">
         Depuis le tableau de bord de ton événement, tu peux retirer les fonds disponibles (revenus moins la
-        commission de 5%) vers ton numéro mobile money. Chaque retrait demande une raison et une confirmation, et
-        reste consultable dans un historique permanent.
+        commission) vers ton numéro mobile money. Chaque retrait demande une raison et une confirmation, et reste
+        consultable dans un historique permanent.
       </FAQItem>
-      <FAQItem i={5} q="Mes billets sont-ils protégés contre la fraude ?">
+      <FAQItem i={5} q="Comment est calculée la commission ?">
+        Elle dépend du prix du billet : 10% par billet jusqu'à 5 000 FCFA, 20% par billet au-delà de 5 000 FCFA.
+      </FAQItem>
+      <FAQItem i={6} q="Mes billets sont-ils protégés contre la fraude ?">
         Chaque billet a un QR code unique et un numéro de rang (N°...). À l'entrée, l'organisateur scanne le billet
         avec la caméra : un billet déjà utilisé, annulé ou inconnu est immédiatement signalé.
       </FAQItem>
@@ -1274,7 +1281,10 @@ function About({ onBack }) {
           plateformes de billetterie — vente en ligne, contrôle d'entrée anti-fraude, tableau de bord de revenus,
           file d'attente pour les fortes demandes — sans complexité ni frais cachés.
         </p>
-        <p style={{ marginBottom: 0 }}>Une commission unique de 5% est prélevée sur les ventes, rien de plus.</p>
+        <p style={{ marginBottom: 0 }}>
+          Une commission simple selon le prix du billet est prélevée sur les ventes, rien de plus : 10% jusqu'à 5 000
+          FCFA, 20% au-delà.
+        </p>
       </div>
     </StaticPage>
   );
@@ -1423,7 +1433,7 @@ function CreatorDash({ profile, events, onLogout, onNew, onOpen }) {
   const capAll = mine.reduce((s, e) => s + totalCap(e), 0);
   const scannedAll = mine.reduce((s, e) => s + Object.keys(e.used || {}).length, 0);
   const fillPct = capAll ? (soldAll / capAll) * 100 : 0;
-  const commission = totalRevenue * 0.05;
+  const totalNet = mine.reduce((s, e) => s + netRevenue(e), 0);
 
   const revAnim = useCountUp(totalRevenue);
   const soldAnim = useCountUp(soldAll);
@@ -1464,8 +1474,8 @@ function CreatorDash({ profile, events, onLogout, onNew, onOpen }) {
               {fmtFCFA(revAnim)}
             </div>
             <div style={{ color: "rgba(255,255,255,.85)", fontSize: 12, marginTop: 6, lineHeight: 1.5 }}>
-              Net après commission 5% :<br />
-              <b style={{ color: "#FFFFFF" }}>{fmtFCFA(totalRevenue - commission)}</b>
+              Net après commission :<br />
+              <b style={{ color: "#FFFFFF" }}>{fmtFCFA(totalNet)}</b>
             </div>
           </div>
           <Ring pct={fillPct} label="rempli" />
@@ -1797,7 +1807,10 @@ function NewEvent({ profile, onBack, onCreate }) {
 
       <Reveal i={3}>
         <div style={{ ...S.card, marginBottom: 16 }}>
-          <div style={{ ...S.label, marginBottom: 12 }}>Catégories de billets</div>
+          <div style={{ ...S.label, marginBottom: 4 }}>Catégories de billets</div>
+          <div style={{ color: C.muted, fontSize: 12.5, marginBottom: 12, lineHeight: 1.5 }}>
+            Commission : 10% par billet à 5 000 FCFA ou moins, 20% au-delà.
+          </div>
           {tiers.map((t, i) => (
             <div
               key={t.id}
@@ -3198,7 +3211,7 @@ function AdminDash({ profile, data, onLogout, onSuspend, onDeleteAccount, onDele
   for (const e of events) eventsByOrganizer[e.creatorId] = (eventsByOrganizer[e.creatorId] || 0) + 1;
 
   const totalRevenue = events.reduce((s, e) => s + revenue(e), 0);
-  const totalCommission = totalRevenue * 0.05;
+  const totalCommission = events.reduce((s, e) => s + commissionAmount(e), 0);
   const totalTickets = events.reduce((s, e) => s + totalSold(e), 0);
   const revAnim = useCountUp(totalCommission);
 
@@ -3219,11 +3232,12 @@ function AdminDash({ profile, data, onLogout, onSuspend, onDeleteAccount, onDele
   };
 
   const exportCommissionsCSV = () => {
-    const rows = [["Organisateur", "Téléphone", "Événements", "Revenu brut (FCFA)", "Commission 5% (FCFA)"]];
+    const rows = [["Organisateur", "Téléphone", "Événements", "Revenu brut (FCFA)", "Commission (FCFA)"]];
     for (const p of organizers) {
       const orgEvents = events.filter((e) => e.creatorId === p.id);
       const rev = orgEvents.reduce((s, e) => s + revenue(e), 0);
-      rows.push([p.name, p.phone || "", orgEvents.length, Math.round(rev), Math.round(rev * 0.05)]);
+      const comm = orgEvents.reduce((s, e) => s + commissionAmount(e), 0);
+      rows.push([p.name, p.phone || "", orgEvents.length, Math.round(rev), Math.round(comm)]);
     }
     const csv = rows.map((r) => r.map((v) => `"${String(v).replace(/"/g, '""')}"`).join(",")).join("\n");
     const blob = new Blob(["﻿" + csv], { type: "text/csv;charset=utf-8;" });
@@ -3244,7 +3258,7 @@ function AdminDash({ profile, data, onLogout, onSuspend, onDeleteAccount, onDele
       <Reveal i={0}>
         <div style={{ ...S.card, background: HERO_GRADIENT, marginBottom: 14 }}>
           <div style={{ color: "rgba(255,255,255,.8)", fontSize: 11, letterSpacing: 1, textTransform: "uppercase", fontWeight: 700, marginBottom: 6 }}>
-            Commissions collectées (5%)
+            Commissions collectées
           </div>
           <div style={{ fontFamily: "'Unbounded', sans-serif", fontWeight: 900, fontSize: 26, color: "#FFFFFF", letterSpacing: -0.5 }}>
             {fmtFCFA(revAnim)}
