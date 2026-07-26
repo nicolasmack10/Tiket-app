@@ -17,6 +17,7 @@ import {
   setSuspendedDB,
   adminDeleteAccountDB,
   adminDeleteEventDB,
+  setCommissionOverrideDB,
   joinQueueDB,
   queuePositionDB,
   tryAdmitSelfDB,
@@ -124,7 +125,10 @@ const totalCap = (ev) => ev.tiers.reduce((s, t) => s + t.capacity, 0);
 const revenue = (ev) => activeBuyers(ev).reduce((s, b) => s + b.qty * b.unitPrice, 0);
 // Commission variable selon le prix du billet : 0–5000 FCFA = 10%, 5001+ FCFA = 20%.
 const commissionRate = (unitPrice) => (unitPrice <= 5000 ? 0.1 : 0.2);
-const commissionAmount = (ev) => activeBuyers(ev).reduce((s, b) => s + b.qty * b.unitPrice * commissionRate(b.unitPrice), 0);
+const commissionAmount = (ev) =>
+  ev.commissionOverride != null
+    ? revenue(ev) * ev.commissionOverride
+    : activeBuyers(ev).reduce((s, b) => s + b.qty * b.unitPrice * commissionRate(b.unitPrice), 0);
 const netRevenue = (ev) => revenue(ev) - commissionAmount(ev);
 const withdrawnTotal = (ev) => (ev.withdrawals || []).reduce((s, w) => s + w.amount, 0);
 const availableFunds = (ev) => netRevenue(ev) - withdrawnTotal(ev);
@@ -861,6 +865,7 @@ export default function TikeApp() {
   };
 
   const ev = activeCode ? events[activeCode] : null;
+  const adminEv = activeCode && adminData ? adminData.events.find((e) => e.code === activeCode) : null;
 
   return (
     <div
@@ -979,11 +984,12 @@ export default function TikeApp() {
             )}
 
             {view === "adminDash" && profile && adminData && (
-              <AdminDash
-                profile={profile}
+              <AdminOverview profile={profile} data={adminData} onLogout={handleLogout} onNav={setView} notify={notify} />
+            )}
+            {view === "adminOrganizers" && adminData && (
+              <AdminOrganizers
                 data={adminData}
-                onLogout={handleLogout}
-                notify={notify}
+                onBack={() => setView("adminDash")}
                 onSuspend={async (userId, suspended) => {
                   try {
                     await setSuspendedDB(userId, suspended);
@@ -1008,6 +1014,60 @@ export default function TikeApp() {
                   setAdminData((prev) => ({ ...prev, profiles: prev.profiles.filter((p) => p.id !== userId) }));
                   notify("Compte supprimé.");
                 }}
+              />
+            )}
+            {view === "adminClients" && adminData && (
+              <AdminClients
+                data={adminData}
+                onBack={() => setView("adminDash")}
+                onSuspend={async (userId, suspended) => {
+                  try {
+                    await setSuspendedDB(userId, suspended);
+                  } catch (err) {
+                    console.error(err);
+                    notify("Échec de la mise à jour du compte.");
+                    return;
+                  }
+                  setAdminData((prev) => ({
+                    ...prev,
+                    profiles: prev.profiles.map((p) => (p.id === userId ? { ...p, suspended } : p)),
+                  }));
+                }}
+                onDeleteAccount={async (userId) => {
+                  try {
+                    await adminDeleteAccountDB(userId);
+                  } catch (err) {
+                    console.error(err);
+                    notify("Échec de la suppression du compte.");
+                    return;
+                  }
+                  setAdminData((prev) => ({ ...prev, profiles: prev.profiles.filter((p) => p.id !== userId) }));
+                  notify("Compte supprimé.");
+                }}
+              />
+            )}
+            {view === "adminEvents" && adminData && (
+              <AdminEvents
+                data={adminData}
+                onBack={() => setView("adminDash")}
+                onOpen={(code) => {
+                  setActiveCode(code);
+                  setView("adminEventDetail");
+                }}
+              />
+            )}
+            {view === "adminEventDetail" && adminData && adminEv && (
+              <AdminEventDetail
+                ev={adminEv}
+                onBack={() => setView("adminEvents")}
+                notify={notify}
+                onSetCommission={async (code, pct) => {
+                  await setCommissionOverrideDB(code, pct);
+                  setAdminData((prev) => ({
+                    ...prev,
+                    events: prev.events.map((e) => (e.code === code ? { ...e, commissionOverride: pct } : e)),
+                  }));
+                }}
                 onDeleteEvent={async (code) => {
                   try {
                     await adminDeleteEventDB(code);
@@ -1018,6 +1078,7 @@ export default function TikeApp() {
                   }
                   setAdminData((prev) => ({ ...prev, events: prev.events.filter((e) => e.code !== code) }));
                   notify("Événement supprimé.");
+                  setView("adminEvents");
                 }}
               />
             )}
@@ -2089,6 +2150,11 @@ function CreatorEvent({ ev, onBack, onScan, notify, onWithdraw }) {
               Retirer
             </button>
           </div>
+          {ev.commissionOverride != null && (
+            <div style={{ color: C.muted, fontSize: 12, marginTop: 10 }}>
+              Commission personnalisée appliquée par l'administrateur : {Math.round(ev.commissionOverride * 100)}%.
+            </div>
+          )}
           {ev.withdrawals.length > 0 && (
             <div style={{ marginTop: 12, paddingTop: 12, borderTop: `1px solid ${C.line}` }}>
               <div style={{ color: C.muted, fontSize: 12, marginBottom: 8 }}>
@@ -3201,35 +3267,15 @@ function AccountRow({ p, eventCount, onSuspend, onDelete, busy }) {
   );
 }
 
-function AdminDash({ profile, data, onLogout, onSuspend, onDeleteAccount, onDeleteEvent, notify }) {
-  const [busyId, setBusyId] = useState(null);
+function AdminOverview({ profile, data, onLogout, onNav, notify }) {
   const { profiles, events } = data;
-
-  const organizers = profiles.filter((p) => p.role === "organizer").sort((a, b) => a.name.localeCompare(b.name));
-  const clients = profiles.filter((p) => p.role === "client").sort((a, b) => a.name.localeCompare(b.name));
-  const eventsByOrganizer = {};
-  for (const e of events) eventsByOrganizer[e.creatorId] = (eventsByOrganizer[e.creatorId] || 0) + 1;
+  const organizers = profiles.filter((p) => p.role === "organizer");
+  const clients = profiles.filter((p) => p.role === "client");
 
   const totalRevenue = events.reduce((s, e) => s + revenue(e), 0);
   const totalCommission = events.reduce((s, e) => s + commissionAmount(e), 0);
   const totalTickets = events.reduce((s, e) => s + totalSold(e), 0);
   const revAnim = useCountUp(totalCommission);
-
-  const wrapSuspend = async (userId, suspended) => {
-    setBusyId(userId);
-    await onSuspend(userId, suspended);
-    setBusyId(null);
-  };
-  const wrapDeleteAccount = async (userId) => {
-    setBusyId(userId);
-    await onDeleteAccount(userId);
-    setBusyId(null);
-  };
-  const wrapDeleteEvent = async (code) => {
-    setBusyId(code);
-    await onDeleteEvent(code);
-    setBusyId(null);
-  };
 
   const exportCommissionsCSV = () => {
     const rows = [["Organisateur", "Téléphone", "Événements", "Revenu brut (FCFA)", "Commission (FCFA)"]];
@@ -3269,34 +3315,62 @@ function AdminDash({ profile, data, onLogout, onSuspend, onDeleteAccount, onDele
         </div>
       </Reveal>
 
-      {/* KPI */}
+      {/* Navigation vers les autres pages admin */}
       <Reveal i={1}>
-        <div className="tk-kpi-grid">
+        <div style={{ display: "grid", gap: 12, marginBottom: 20 }}>
           {[
-            { k: "Organisateurs", v: organizers.length, c: C.blue },
-            { k: "Clients", v: clients.length, c: C.green },
-            { k: "Événements", v: events.length, c: C.amber },
+            { id: "adminOrganizers", icon: "🎤", label: "Organisateurs", count: organizers.length },
+            { id: "adminClients", icon: "🎟️", label: "Clients", count: clients.length },
+            { id: "adminEvents", icon: "📅", label: "Événements", count: events.length },
           ].map((x) => (
-            <div key={x.k} style={{ ...S.card, padding: 14, textAlign: "center" }}>
-              <div style={{ fontFamily: "'Unbounded', sans-serif", fontWeight: 700, fontSize: 20, color: x.c }}>{x.v}</div>
-              <div style={{ fontSize: 10.5, color: C.muted, letterSpacing: 0.6, textTransform: "uppercase", fontWeight: 700, marginTop: 3 }}>
-                {x.k}
+            <button
+              key={x.id}
+              onClick={() => onNav(x.id)}
+              className="tk-press tk-lift"
+              style={{ ...S.card, display: "flex", alignItems: "center", gap: 14, textAlign: "left", cursor: "pointer", color: C.text, width: "100%" }}
+            >
+              <div style={{ fontSize: 24 }}>{x.icon}</div>
+              <div style={{ flex: 1 }}>
+                <div style={{ fontWeight: 700, fontSize: 15 }}>{x.label}</div>
+                <div style={{ color: C.muted, fontSize: 12.5 }}>{x.count} au total</div>
               </div>
-            </div>
+              <div style={{ color: C.muted, fontSize: 18 }}>→</div>
+            </button>
           ))}
         </div>
       </Reveal>
 
       <Reveal i={2}>
-        <button className="tk-press" style={{ ...S.btnGhost, marginBottom: 20 }} onClick={exportCommissionsCSV}>
+        <button className="tk-press" style={S.btnGhost} onClick={exportCommissionsCSV}>
           ⬇ Exporter les commissions par organisateur (CSV)
         </button>
       </Reveal>
+    </div>
+  );
+}
 
-      {/* Organisateurs */}
-      <Reveal i={3}>
-        <div style={{ ...S.card, marginBottom: 14 }}>
-          <div style={{ ...S.label, marginBottom: 4 }}>Organisateurs ({organizers.length})</div>
+function AdminOrganizers({ data, onBack, onSuspend, onDeleteAccount }) {
+  const [busyId, setBusyId] = useState(null);
+  const organizers = data.profiles.filter((p) => p.role === "organizer").sort((a, b) => a.name.localeCompare(b.name));
+  const eventsByOrganizer = {};
+  for (const e of data.events) eventsByOrganizer[e.creatorId] = (eventsByOrganizer[e.creatorId] || 0) + 1;
+
+  const wrapSuspend = async (userId, suspended) => {
+    setBusyId(userId);
+    await onSuspend(userId, suspended);
+    setBusyId(null);
+  };
+  const wrapDeleteAccount = async (userId) => {
+    setBusyId(userId);
+    await onDeleteAccount(userId);
+    setBusyId(null);
+  };
+
+  return (
+    <div>
+      <Top title={`Organisateurs (${organizers.length})`} onBack={onBack} />
+      <Reveal i={0}>
+        <div style={S.card}>
           {organizers.length === 0 ? (
             <div style={{ color: C.muted, fontSize: 13.5, padding: "10px 0" }}>Aucun organisateur inscrit.</div>
           ) : (
@@ -3313,40 +3387,75 @@ function AdminDash({ profile, data, onLogout, onSuspend, onDeleteAccount, onDele
           )}
         </div>
       </Reveal>
+    </div>
+  );
+}
 
-      {/* Clients */}
-      <Reveal i={4}>
-        <div style={{ ...S.card, marginBottom: 14 }}>
-          <div style={{ ...S.label, marginBottom: 4 }}>Clients ({clients.length})</div>
+function AdminClients({ data, onBack, onSuspend, onDeleteAccount }) {
+  const [busyId, setBusyId] = useState(null);
+  const clients = data.profiles.filter((p) => p.role === "client").sort((a, b) => a.name.localeCompare(b.name));
+
+  const wrapSuspend = async (userId, suspended) => {
+    setBusyId(userId);
+    await onSuspend(userId, suspended);
+    setBusyId(null);
+  };
+  const wrapDeleteAccount = async (userId) => {
+    setBusyId(userId);
+    await onDeleteAccount(userId);
+    setBusyId(null);
+  };
+
+  return (
+    <div>
+      <Top title={`Clients (${clients.length})`} onBack={onBack} />
+      <Reveal i={0}>
+        <div style={S.card}>
           {clients.length === 0 ? (
             <div style={{ color: C.muted, fontSize: 13.5, padding: "10px 0" }}>Aucun client inscrit.</div>
           ) : (
-            clients.map((p) => (
-              <AccountRow key={p.id} p={p} busy={busyId === p.id} onSuspend={wrapSuspend} onDelete={wrapDeleteAccount} />
-            ))
+            clients.map((p) => <AccountRow key={p.id} p={p} busy={busyId === p.id} onSuspend={wrapSuspend} onDelete={wrapDeleteAccount} />)
           )}
         </div>
       </Reveal>
+    </div>
+  );
+}
 
-      {/* Événements */}
-      <Reveal i={5}>
+function AdminEvents({ data, onBack, onOpen }) {
+  const events = data.events.slice().sort((a, b) => b.ts - a.ts);
+  return (
+    <div>
+      <Top title={`Événements (${events.length})`} onBack={onBack} />
+      <Reveal i={0}>
         <div style={S.card}>
-          <div style={{ ...S.label, marginBottom: 4 }}>Tous les événements ({events.length})</div>
           {events.length === 0 ? (
             <div style={{ color: C.muted, fontSize: 13.5, padding: "10px 0" }}>Aucun événement pour l'instant.</div>
           ) : (
-            events
-              .slice()
-              .sort((a, b) => b.ts - a.ts)
-              .map((e) => (
+            events.map((e, i) => (
+              <button
+                key={e.code}
+                onClick={() => onOpen(e.code)}
+                className="tk-press"
+                style={{
+                  width: "100%",
+                  background: "none",
+                  border: "none",
+                  padding: 0,
+                  cursor: "pointer",
+                  textAlign: "left",
+                  fontFamily: "'Space Grotesk', sans-serif",
+                  color: C.text,
+                  display: "block",
+                }}
+              >
                 <div
-                  key={e.code}
                   style={{
                     display: "flex",
                     alignItems: "center",
                     gap: 10,
                     padding: "12px 0",
-                    borderBottom: `1px solid ${C.line}`,
+                    borderBottom: i < events.length - 1 ? `1px solid ${C.line}` : "none",
                   }}
                 >
                   <div style={{ flex: 1, minWidth: 0 }}>
@@ -3357,32 +3466,144 @@ function AdminDash({ profile, data, onLogout, onSuspend, onDeleteAccount, onDele
                       {e.date} · {e.venue}, {e.city} · {fmtFCFA(revenue(e))}
                     </div>
                   </div>
-                  <button
-                    className="tk-press"
-                    disabled={busyId === e.code}
-                    onClick={() => {
-                      if (window.confirm(`Supprimer définitivement « ${e.name} » et toutes ses ventes ?`)) wrapDeleteEvent(e.code);
-                    }}
-                    style={{
-                      background: "transparent",
-                      border: `1px solid ${C.pink}`,
-                      color: C.pink,
-                      borderRadius: 8,
-                      padding: "7px 10px",
-                      fontSize: 12,
-                      fontWeight: 700,
-                      cursor: "pointer",
-                      fontFamily: "'Space Grotesk', sans-serif",
-                      opacity: busyId === e.code ? 0.5 : 1,
-                      flexShrink: 0,
-                    }}
-                  >
-                    Suppr.
-                  </button>
+                  {e.commissionOverride != null && (
+                    <div
+                      style={{
+                        fontSize: 10,
+                        fontWeight: 700,
+                        color: C.amber,
+                        background: "rgba(255,122,26,.12)",
+                        border: `1px solid ${C.amber}`,
+                        borderRadius: 999,
+                        padding: "2px 8px",
+                        whiteSpace: "nowrap",
+                        flexShrink: 0,
+                      }}
+                    >
+                      {Math.round(e.commissionOverride * 100)}%
+                    </div>
+                  )}
+                  <div style={{ color: C.muted, fontSize: 18, flexShrink: 0 }}>→</div>
                 </div>
-              ))
+              </button>
+            ))
           )}
         </div>
+      </Reveal>
+    </div>
+  );
+}
+
+function AdminEventDetail({ ev, onBack, onDeleteEvent, onSetCommission, notify }) {
+  const [busy, setBusy] = useState(false);
+  const [pct, setPct] = useState(ev.commissionOverride != null ? String(Math.round(ev.commissionOverride * 1000) / 10) : "");
+  const [savingCommission, setSavingCommission] = useState(false);
+
+  const rev = revenue(ev);
+  const comm = commissionAmount(ev);
+  const sold = totalSold(ev);
+  const effectiveRate = rev > 0 ? (comm / rev) * 100 : null;
+
+  const saveCommission = async () => {
+    const trimmed = pct.trim();
+    const n = trimmed === "" ? null : Number(trimmed);
+    if (trimmed !== "" && (isNaN(n) || n < 0 || n > 100)) {
+      notify("Pourcentage invalide (entre 0 et 100).");
+      return;
+    }
+    setSavingCommission(true);
+    try {
+      await onSetCommission(ev.code, n === null ? null : n / 100);
+      notify(n === null ? "Retour aux paliers par défaut." : `Commission fixée à ${n}%.`);
+    } catch (e) {
+      console.error(e);
+      notify("Échec de la mise à jour.");
+    } finally {
+      setSavingCommission(false);
+    }
+  };
+
+  const del = async () => {
+    if (!window.confirm(`Supprimer définitivement « ${ev.name} » et toutes ses ventes ?`)) return;
+    setBusy(true);
+    await onDeleteEvent(ev.code);
+    setBusy(false);
+  };
+
+  return (
+    <div>
+      <Top title={ev.name} onBack={onBack} />
+
+      {ev.posterUrl && (
+        <Reveal i={0}>
+          <img
+            src={ev.posterUrl}
+            alt=""
+            style={{ width: "100%", display: "block", maxHeight: 200, objectFit: "cover", borderRadius: 18, marginBottom: 14 }}
+          />
+        </Reveal>
+      )}
+
+      <Reveal i={1}>
+        <div style={{ ...S.card, marginBottom: 14 }}>
+          <div style={S.label}>Revenu brut</div>
+          <div style={{ fontFamily: "'Unbounded', sans-serif", fontWeight: 900, fontSize: 22, color: C.amber }}>{fmtFCFA(rev)}</div>
+          <div style={{ color: C.muted, fontSize: 12.5, marginTop: 8 }}>
+            {ev.date} · {ev.venue}, {ev.city}
+          </div>
+        </div>
+      </Reveal>
+
+      <Reveal i={2}>
+        <div className="tk-kpi-grid">
+          {[
+            { k: "Billets vendus", v: sold, c: C.text },
+            { k: "Commission", v: fmtShort(comm), c: C.pink },
+            { k: "Taux effectif", v: effectiveRate != null ? `${effectiveRate.toFixed(1)}%` : "—", c: C.blue },
+          ].map((x) => (
+            <div key={x.k} style={{ ...S.card, padding: 14, textAlign: "center" }}>
+              <div style={{ fontFamily: "'Unbounded', sans-serif", fontWeight: 700, fontSize: 17, color: x.c }}>{x.v}</div>
+              <div style={{ fontSize: 9.5, color: C.muted, letterSpacing: 0.5, textTransform: "uppercase", fontWeight: 700, marginTop: 4 }}>
+                {x.k}
+              </div>
+            </div>
+          ))}
+        </div>
+      </Reveal>
+
+      <Reveal i={3}>
+        <div style={{ ...S.card, marginBottom: 14 }}>
+          <div style={S.label}>Commission personnalisée</div>
+          <div style={{ color: C.muted, fontSize: 12.5, margin: "8px 0 12px", lineHeight: 1.5 }}>
+            {ev.commissionOverride != null
+              ? `Un taux fixe de ${Math.round(ev.commissionOverride * 100)}% s'applique à cet événement, à la place des paliers par défaut (10% / 20%).`
+              : "Cet événement utilise les paliers par défaut (10% jusqu'à 5 000 FCFA, 20% au-delà)."}
+          </div>
+          <div style={{ display: "flex", gap: 10, alignItems: "center", marginBottom: 12 }}>
+            <input
+              style={{ ...S.input, marginBottom: 0, flex: 1 }}
+              inputMode="decimal"
+              value={pct}
+              onChange={(e) => setPct(e.target.value)}
+              placeholder="Laisser vide = paliers par défaut"
+            />
+            <span style={{ color: C.muted, fontSize: 14, flexShrink: 0 }}>%</span>
+          </div>
+          <button
+            className="tk-press"
+            style={{ ...S.btn, opacity: savingCommission ? 0.6 : 1 }}
+            disabled={savingCommission}
+            onClick={saveCommission}
+          >
+            {savingCommission ? "…" : "Enregistrer"}
+          </button>
+        </div>
+      </Reveal>
+
+      <Reveal i={4}>
+        <button className="tk-press" style={{ ...S.btn, background: C.pink, opacity: busy ? 0.6 : 1 }} disabled={busy} onClick={del}>
+          {busy ? "…" : "Supprimer l'événement"}
+        </button>
       </Reveal>
     </div>
   );

@@ -13,6 +13,7 @@ function rowToEvent(row) {
     desc: row.description,
     posterUrl: row.poster_url,
     queueEnabled: row.queue_enabled,
+    commissionOverride: row.commission_override_pct != null ? Number(row.commission_override_pct) : null,
     tiers: row.tiers || [],
     used: row.used || {},
     ts: row.ts,
@@ -241,6 +242,11 @@ export async function adminDeleteAccountDB(userId) {
 
 export async function adminDeleteEventDB(code) {
   const { error } = await supabase.from("events").delete().eq("code", code);
+  if (error) throw error;
+}
+
+export async function setCommissionOverrideDB(code, pct) {
+  const { error } = await supabase.from("events").update({ commission_override_pct: pct }).eq("code", code);
   if (error) throw error;
 }
 
