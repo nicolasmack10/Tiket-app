@@ -772,6 +772,18 @@ export default function TikeApp() {
     }
   }, []);
 
+  // Recharge un seul événement (ex. en ouvrant sa page, ou pendant un scan) :
+  // le tableau de bord n'est chargé qu'une fois à la connexion, donc sans ça
+  // les billets achetés après coup par des clients ne seraient jamais vus.
+  const refreshEvent = useCallback(async (code) => {
+    try {
+      const fresh = await openEventByCode(code);
+      if (fresh) setEvents((prev) => ({ ...prev, [code]: fresh }));
+    } catch (e) {
+      console.error(e);
+    }
+  }, []);
+
   const loadClientEvents = useCallback(async (userId) => {
     try {
       setEvents(await fetchClientEvents(userId));
@@ -920,6 +932,7 @@ export default function TikeApp() {
                 onOpen={(code) => {
                   setActiveCode(code);
                   setView("cEvent");
+                  refreshEvent(code);
                 }}
               />
             )}
@@ -946,7 +959,10 @@ export default function TikeApp() {
               <CreatorEvent
                 ev={ev}
                 onBack={() => setView("cDash")}
-                onScan={() => setView("cScan")}
+                onScan={() => {
+                  setView("cScan");
+                  refreshEvent(ev.code);
+                }}
                 notify={notify}
                 onWithdraw={async (amount, phone, reason) => {
                   const actual = await withdrawFundsDB(ev.code, amount, phone, reason);
@@ -966,6 +982,7 @@ export default function TikeApp() {
               <Scanner
                 ev={ev}
                 onBack={() => setView("cEvent")}
+                onRefresh={() => refreshEvent(ev.code)}
                 onMarkUsed={async (ticketId) => {
                   const ts = Date.now();
                   try {
@@ -2449,7 +2466,7 @@ function CreatorEvent({ ev, onBack, onScan, notify, onWithdraw }) {
 }
 
 /* ============================ Scanner anti-fraude (caméra QR + saisie manuelle) ============================ */
-function Scanner({ ev, onBack, onMarkUsed }) {
+function Scanner({ ev, onBack, onMarkUsed, onRefresh }) {
   const [input, setInput] = useState("");
   const [result, setResult] = useState(null);
   const [scanning, setScanning] = useState(false);
@@ -2505,6 +2522,15 @@ function Scanner({ ev, onBack, onMarkUsed }) {
   useEffect(() => {
     checkRef.current = check;
   }, [check]);
+
+  // Les ventes se poursuivent pendant le contrôle d'entrée : on recharge
+  // régulièrement les billets de l'événement pour reconnaître ceux achetés
+  // depuis l'ouverture de cet écran.
+  useEffect(() => {
+    if (!onRefresh) return;
+    const id = setInterval(onRefresh, 6000);
+    return () => clearInterval(id);
+  }, [onRefresh]);
 
   const loop = useCallback(() => {
     const video = videoRef.current;
