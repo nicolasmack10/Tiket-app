@@ -144,7 +144,10 @@ export async function fetchClientEvents(userId) {
 }
 
 export async function openEventByCode(code) {
-  const { data, error } = await supabase.from("events").select("*").eq("code", code).maybeSingle();
+  // Passe par une fonction dédiée plutôt qu'un select direct : la table events
+  // n'est plus lisible que pour ses propres événements/achats (voir migration
+  // de sécurité), le code de partage fait office de clé d'accès pour le reste.
+  const { data, error } = await supabase.rpc("get_event_by_code", { p_code: code }).maybeSingle();
   if (error) throw error;
   if (!data) return null;
   const byCode = await assemble([data], [data.code]);
