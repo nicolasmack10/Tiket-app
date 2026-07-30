@@ -902,7 +902,23 @@ export default function TikeApp() {
           p = null;
         }
         if (p) {
-          await routeAfterAuth(p);
+          let expectedRole = null;
+          try {
+            expectedRole = localStorage.getItem("tike:pending-role");
+            localStorage.removeItem("tike:pending-role");
+          } catch {}
+          if (expectedRole && p.role !== expectedRole && p.role !== "admin") {
+            await signOut();
+            notify(
+              expectedRole === "organizer"
+                ? "Ce compte est enregistré comme client. Utilise la carte « Je suis client » pour te connecter."
+                : "Ce compte est enregistré comme organisateur. Utilise la carte « Je suis organisateur » pour te connecter."
+            );
+            setPendingRole(expectedRole);
+            setView("auth");
+          } else {
+            await routeAfterAuth(p);
+          }
         } else {
           // Session valide mais pas de profil applicatif : première connexion Google.
           setPendingUser({
@@ -1654,6 +1670,14 @@ function Auth({ role, onBack, onDone, onForgotPassword }) {
     setBusy(true);
     try {
       const profile = mode === "signup" ? await signUp({ email, password, role, name, phone }) : await signIn({ email, password });
+      if (mode === "login" && profile.role !== role && profile.role !== "admin") {
+        await signOut();
+        throw new Error(
+          role === "organizer"
+            ? "Ce compte est enregistré comme client. Utilise la carte « Je suis client » pour te connecter."
+            : "Ce compte est enregistré comme organisateur. Utilise la carte « Je suis organisateur » pour te connecter."
+        );
+      }
       onDone(profile);
     } catch (e) {
       setErr(e.message || "Une erreur est survenue.");
@@ -1666,6 +1690,9 @@ function Auth({ role, onBack, onDone, onForgotPassword }) {
     setErr("");
     setGoogleBusy(true);
     try {
+      try {
+        localStorage.setItem("tike:pending-role", role);
+      } catch {}
       await signInWithGoogle();
       // La page redirige vers Google — rien d'autre à faire ici.
     } catch (e) {
