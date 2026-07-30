@@ -94,8 +94,8 @@ const ANIM_CSS = `
 .tk-home-grid { display: grid; gap: 14px; margin-top: 26px; }
 @media (min-width: 520px) { .tk-home-grid { grid-template-columns: repeat(2, 1fr); } }
 
-.tk-tutorial { position: fixed; right: 20px; bottom: 20px; width: 280px; z-index: 40; }
-@media (max-width: 640px) { .tk-tutorial { left: 16px; right: 16px; width: auto; bottom: 16px; } }
+.tk-tutorial { position: fixed; top: 18px; right: 18px; width: 250px; z-index: 40; }
+@media (max-width: 640px) { .tk-tutorial { display: none; } }
 
 .tk-countdown { display: flex; gap: 8px; flex-wrap: wrap; }
 .tk-countdown > div { flex: 1; min-width: 56px; }
@@ -938,24 +938,46 @@ export default function TikeApp() {
     setView("home");
   };
 
-  // Déconnexion automatique après 2h sans interaction.
+  // Déconnexion automatique après 1h sans interaction. On compare des
+  // horodatages réels (plutôt qu'un setTimeout brut) car un setTimeout de
+  // longue durée ne s'écoule pas pendant que l'ordinateur est en veille —
+  // il fallait littéralement laisser l'onglet actif sans interruption pour
+  // que l'ancienne version se déclenche, ce qui explique qu'elle ne se soit
+  // (quasi) jamais déclenchée en usage réel.
   useEffect(() => {
     if (!profile) return;
-    const LIMIT_MS = 2 * 60 * 60 * 1000;
-    let timer;
-    const reset = () => {
-      clearTimeout(timer);
-      timer = setTimeout(() => {
-        handleLogout();
-        notify("Déconnecté après 2h d'inactivité.");
-      }, LIMIT_MS);
+    const LIMIT_MS = 60 * 60 * 1000;
+    const KEY = "tike:last-activity";
+    let loggedOut = false;
+
+    const mark = () => {
+      try {
+        localStorage.setItem(KEY, String(Date.now()));
+      } catch {}
     };
+    mark();
+
+    const checkNow = () => {
+      if (loggedOut) return;
+      let last = Date.now();
+      try {
+        last = Number(localStorage.getItem(KEY)) || Date.now();
+      } catch {}
+      if (Date.now() - last >= LIMIT_MS) {
+        loggedOut = true;
+        handleLogout();
+        notify("Déconnecté après 1h d'inactivité.");
+      }
+    };
+
     const events = ["mousedown", "mousemove", "keydown", "touchstart", "scroll", "wheel"];
-    events.forEach((e) => window.addEventListener(e, reset, { passive: true }));
-    reset();
+    events.forEach((e) => window.addEventListener(e, mark, { passive: true }));
+    document.addEventListener("visibilitychange", checkNow);
+    const interval = setInterval(checkNow, 60000);
     return () => {
-      clearTimeout(timer);
-      events.forEach((e) => window.removeEventListener(e, reset));
+      clearInterval(interval);
+      events.forEach((e) => window.removeEventListener(e, mark));
+      document.removeEventListener("visibilitychange", checkNow);
     };
   }, [profile]); // eslint-disable-line
 
@@ -1283,7 +1305,7 @@ export default function TikeApp() {
 /* ============================ Accueil ============================ */
 function Home({ onPickRole, onNav }) {
   return (
-    <div style={{ maxWidth: 640, margin: "0 auto" }}>
+    <div style={{ maxWidth: 640, margin: "0 auto", minHeight: "calc(100vh - 40px)", display: "flex", flexDirection: "column" }}>
       <Reveal i={0}>
         <div style={{ padding: "44px 0 8px" }}>
           <div
@@ -1333,8 +1355,8 @@ function Home({ onPickRole, onNav }) {
         </Reveal>
       </div>
 
-      <Reveal i={3}>
-        <div style={{ display: "flex", justifyContent: "center", gap: 18, marginTop: 34, flexWrap: "wrap" }}>
+      <Reveal i={3} style={{ marginTop: "auto" }}>
+        <div style={{ display: "flex", justifyContent: "center", gap: 18, paddingTop: 34, flexWrap: "wrap" }}>
           {[
             { id: "faq", label: "FAQ" },
             { id: "about", label: "À propos" },
