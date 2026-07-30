@@ -6,10 +6,15 @@ export async function getProfile(userId) {
   return data;
 }
 
-export async function getSessionProfile() {
+export async function getSession() {
   const {
     data: { session },
   } = await supabase.auth.getSession();
+  return session;
+}
+
+export async function getSessionProfile() {
+  const session = await getSession();
   if (!session) return null;
   try {
     return await getProfile(session.user.id);
@@ -37,4 +42,44 @@ export async function signIn({ email, password }) {
 
 export async function signOut() {
   await supabase.auth.signOut();
+}
+
+/* ---------- Google OAuth ---------- */
+export async function signInWithGoogle() {
+  const { error } = await supabase.auth.signInWithOAuth({
+    provider: "google",
+    options: { redirectTo: window.location.origin },
+  });
+  if (error) throw error;
+}
+
+// Après une première connexion Google, il n'existe pas encore de profil
+// applicatif (role/nom/téléphone) : on le crée une fois que l'utilisateur
+// les a renseignés dans l'écran "Compléter mon profil".
+export async function createProfileForCurrentUser({ role, name, phone }) {
+  const session = await getSession();
+  if (!session) throw new Error("Session expirée — reconnecte-toi.");
+  const { error } = await supabase.from("profiles").insert({ id: session.user.id, role, name, phone });
+  if (error) throw error;
+  return { id: session.user.id, role, name, phone };
+}
+
+/* ---------- Mot de passe oublié ---------- */
+export async function sendPasswordReset(email) {
+  const { error } = await supabase.auth.resetPasswordForEmail(email, {
+    redirectTo: window.location.origin,
+  });
+  if (error) throw error;
+}
+
+export async function updatePassword(newPassword) {
+  const { error } = await supabase.auth.updateUser({ password: newPassword });
+  if (error) throw error;
+}
+
+export function onAuthEvent(callback) {
+  const {
+    data: { subscription },
+  } = supabase.auth.onAuthStateChange((event, session) => callback(event, session));
+  return () => subscription.unsubscribe();
 }

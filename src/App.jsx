@@ -28,7 +28,19 @@ import {
   fetchMyRefundRequestsDB,
   resolveRefundDB,
 } from "./lib/db";
-import { getSessionProfile, signUp, signIn, signOut } from "./lib/auth";
+import {
+  getSessionProfile,
+  getSession,
+  getProfile,
+  signUp,
+  signIn,
+  signOut,
+  signInWithGoogle,
+  createProfileForCurrentUser,
+  sendPasswordReset,
+  updatePassword,
+  onAuthEvent,
+} from "./lib/auth";
 
 /* ============================================================
    TIKÉ v4 — Billetterie par lien, paiement mobile money
@@ -67,10 +79,23 @@ const ANIM_CSS = `
 
 .tk-shell { max-width: 460px; margin: 0 auto; padding: 0 18px 40px; box-sizing: border-box; }
 @media (min-width: 640px) { .tk-shell { max-width: 600px; } }
-@media (min-width: 960px) { .tk-shell { max-width: 760px; } }
+@media (min-width: 960px) { .tk-shell { max-width: 900px; } }
+@media (min-width: 1280px) { .tk-shell { max-width: 1180px; padding-top: 8px; } }
+@media (min-width: 1600px) { .tk-shell { max-width: 1400px; } }
+
+.tk-shell-narrow { max-width: 640px !important; }
 
 .tk-kpi-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin-bottom: 14px; }
 @media (max-width: 380px) { .tk-kpi-grid { grid-template-columns: repeat(auto-fit, minmax(92px, 1fr)); } }
+
+.tk-list-grid { display: grid; gap: 12px; }
+@media (min-width: 720px) { .tk-list-grid { grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); } }
+
+.tk-home-grid { display: grid; gap: 14px; margin-top: 26px; }
+@media (min-width: 520px) { .tk-home-grid { grid-template-columns: repeat(2, 1fr); } }
+
+.tk-tutorial { position: fixed; right: 20px; bottom: 20px; width: 280px; z-index: 40; }
+@media (max-width: 640px) { .tk-tutorial { left: 16px; right: 16px; width: auto; bottom: 16px; } }
 
 .tk-countdown { display: flex; gap: 8px; flex-wrap: wrap; }
 .tk-countdown > div { flex: 1; min-width: 56px; }
@@ -117,6 +142,18 @@ const codeFromPath = () => {
   const m = window.location.pathname.match(/^\/e\/([A-Za-z0-9]+)/);
   return m ? m[1].toUpperCase() : null;
 };
+
+// Pages tableau de bord / listes : profitent d'un conteneur pleine largeur sur
+// grand écran. Le reste (formulaires, détails) reste centré et lisible.
+const WIDE_VIEWS = new Set([
+  "home",
+  "cDash",
+  "clientDash",
+  "adminDash",
+  "adminOrganizers",
+  "adminClients",
+  "adminEvents",
+]);
 
 const activeBuyers = (ev) => ev.buyers.filter((b) => !b.cancelled);
 const tierSold = (ev, tierId) => activeBuyers(ev).filter((b) => b.tierId === tierId).reduce((s, b) => s + b.qty, 0);
@@ -823,25 +860,58 @@ export default function TikeApp() {
     }
   }, []); // eslint-disable-line
 
+  const [pendingUser, setPendingUser] = useState(null);
   const pendingCode = useRef(codeFromPath());
 
+  const routeAfterAuth = useCallback(
+    async (p) => {
+      setProfile(p);
+      setPendingUser(null);
+      if (p.role === "organizer") {
+        await loadOrganizerEvents(p.id);
+        setView("cDash");
+      } else if (p.role === "admin") {
+        await loadAdminData();
+        setView("adminDash");
+      } else {
+        await loadClientEvents(p.id);
+        const code = pendingCode.current;
+        pendingCode.current = null;
+        if (!code || !(await openSharedEvent(p.id, code))) setView("clientDash");
+      }
+    },
+    [loadOrganizerEvents, loadAdminData, loadClientEvents, openSharedEvent]
+  );
+
+  // Un lien de réinitialisation de mot de passe redirige ici avec
+  // #type=recovery dans l'URL : on doit montrer l'écran "nouveau mot de
+  // passe" en priorité, avant tout routage normal basé sur la session.
   useEffect(() => {
+    if (typeof window !== "undefined" && window.location.hash.includes("type=recovery")) {
+      setView("resetPassword");
+      setLoading(false);
+      return;
+    }
     (async () => {
       if (pendingCode.current) window.history.replaceState({}, "", "/");
-      const p = await getSessionProfile();
-      if (p) {
-        setProfile(p);
-        if (p.role === "organizer") {
-          await loadOrganizerEvents(p.id);
-          setView("cDash");
-        } else if (p.role === "admin") {
-          await loadAdminData();
-          setView("adminDash");
+      const session = await getSession();
+      if (session) {
+        let p = null;
+        try {
+          p = await getProfile(session.user.id);
+        } catch {
+          p = null;
+        }
+        if (p) {
+          await routeAfterAuth(p);
         } else {
-          await loadClientEvents(p.id);
-          const code = pendingCode.current;
-          pendingCode.current = null;
-          if (!code || !(await openSharedEvent(p.id, code))) setView("clientDash");
+          // Session valide mais pas de profil applicatif : première connexion Google.
+          setPendingUser({
+            id: session.user.id,
+            email: session.user.email,
+            name: session.user.user_metadata?.full_name || session.user.user_metadata?.name || "",
+          });
+          setView("completeProfile");
         }
       } else if (pendingCode.current) {
         setPendingRole("client");
@@ -851,21 +921,13 @@ export default function TikeApp() {
     })();
   }, []); // eslint-disable-line
 
-  const handleAuthDone = async (p) => {
-    setProfile(p);
-    if (p.role === "organizer") {
-      await loadOrganizerEvents(p.id);
-      setView("cDash");
-    } else if (p.role === "admin") {
-      await loadAdminData();
-      setView("adminDash");
-    } else {
-      await loadClientEvents(p.id);
-      const code = pendingCode.current;
-      pendingCode.current = null;
-      if (!code || !(await openSharedEvent(p.id, code))) setView("clientDash");
-    }
-  };
+  // Filet de sécurité : si un événement de récupération de mot de passe
+  // survient pendant que l'app tourne déjà.
+  useEffect(() => onAuthEvent((event) => {
+    if (event === "PASSWORD_RECOVERY") setView("resetPassword");
+  }), []);
+
+  const handleAuthDone = routeAfterAuth;
 
   const handleLogout = async () => {
     await signOut();
@@ -875,6 +937,27 @@ export default function TikeApp() {
     setActiveCode(null);
     setView("home");
   };
+
+  // Déconnexion automatique après 2h sans interaction.
+  useEffect(() => {
+    if (!profile) return;
+    const LIMIT_MS = 2 * 60 * 60 * 1000;
+    let timer;
+    const reset = () => {
+      clearTimeout(timer);
+      timer = setTimeout(() => {
+        handleLogout();
+        notify("Déconnecté après 2h d'inactivité.");
+      }, LIMIT_MS);
+    };
+    const events = ["mousedown", "mousemove", "keydown", "touchstart", "scroll", "wheel"];
+    events.forEach((e) => window.addEventListener(e, reset, { passive: true }));
+    reset();
+    return () => {
+      clearTimeout(timer);
+      events.forEach((e) => window.removeEventListener(e, reset));
+    };
+  }, [profile]); // eslint-disable-line
 
   const ev = activeCode ? events[activeCode] : null;
   const adminEv = activeCode && adminData ? adminData.events.find((e) => e.code === activeCode) : null;
@@ -890,7 +973,7 @@ export default function TikeApp() {
     >
       <style>{FONT_CSS}</style>
       <style>{ANIM_CSS}</style>
-      <div className="tk-shell">
+      <div className={`tk-shell ${WIDE_VIEWS.has(view) ? "" : "tk-shell-narrow"}`}>
         {loading ? (
           <div style={{ padding: "70px 0" }}>
             {[0, 1, 2].map((i) => (
@@ -918,7 +1001,26 @@ export default function TikeApp() {
                 onNav={setView}
               />
             )}
-            {view === "auth" && <Auth role={pendingRole} onBack={() => setView("home")} onDone={handleAuthDone} />}
+            {view === "auth" && (
+              <Auth
+                role={pendingRole}
+                onBack={() => setView("home")}
+                onDone={handleAuthDone}
+                onForgotPassword={() => setView("forgotPassword")}
+              />
+            )}
+            {view === "forgotPassword" && <ForgotPassword onBack={() => setView("auth")} />}
+            {view === "resetPassword" && (
+              <ResetPassword
+                onDone={async (p) => {
+                  if (p) await routeAfterAuth(p);
+                  else setView("home");
+                }}
+              />
+            )}
+            {view === "completeProfile" && pendingUser && (
+              <CompleteProfile pendingUser={pendingUser} onDone={routeAfterAuth} />
+            )}
             {view === "faq" && <FAQ onBack={() => setView("home")} />}
             {view === "about" && <About onBack={() => setView("home")} />}
             {view === "contact" && <Contact onBack={() => setView("home")} />}
@@ -1181,7 +1283,7 @@ export default function TikeApp() {
 /* ============================ Accueil ============================ */
 function Home({ onPickRole, onNav }) {
   return (
-    <div>
+    <div style={{ maxWidth: 640, margin: "0 auto" }}>
       <Reveal i={0}>
         <div style={{ padding: "44px 0 8px" }}>
           <div
@@ -1203,7 +1305,7 @@ function Home({ onPickRole, onNav }) {
         </div>
       </Reveal>
 
-      <div style={{ display: "grid", gap: 14, marginTop: 26 }}>
+      <div className="tk-home-grid">
         <Reveal i={1}>
           <button
             onClick={() => onPickRole("organizer")}
@@ -1259,6 +1361,88 @@ function Home({ onPickRole, onNav }) {
           ))}
         </div>
       </Reveal>
+
+      <TutorialCorner />
+    </div>
+  );
+}
+
+/* ---------- Diaporama tuto (coin de l'écran) ---------- */
+const TUTORIAL_SLIDES = [
+  { icon: "🎤", title: "Crée ton événement", text: "Nom, date, lieu, catégories de billets et affiche — prêt en 2 minutes." },
+  { icon: "🔗", title: "Partage ton lien", text: "Un lien unique à envoyer sur WhatsApp ou Facebook. Pas de vitrine publique." },
+  { icon: "📲", title: "Encaisse par mobile money", text: "Tes invités payent directement par MTN MoMo ou Airtel Money." },
+  { icon: "🎟️", title: "Billets avec QR unique", text: "Chaque billet a un QR code, un numéro N° et est vérifiable à l'entrée." },
+  { icon: "🛡️", title: "Contrôle d'entrée live", text: "Scanne les billets à la caméra le jour J — fraude et doublons détectés." },
+];
+
+function TutorialCorner() {
+  const [i, setI] = useState(0);
+  const [dismissed, setDismissed] = useState(() => {
+    try {
+      return localStorage.getItem("tike:tuto-dismissed") === "1";
+    } catch {
+      return false;
+    }
+  });
+
+  useEffect(() => {
+    if (dismissed) return;
+    const id = setInterval(() => setI((v) => (v + 1) % TUTORIAL_SLIDES.length), 4200);
+    return () => clearInterval(id);
+  }, [dismissed]);
+
+  if (dismissed) return null;
+
+  const dismiss = () => {
+    setDismissed(true);
+    try {
+      localStorage.setItem("tike:tuto-dismissed", "1");
+    } catch {}
+  };
+
+  const slide = TUTORIAL_SLIDES[i];
+
+  return (
+    <div className="tk-tutorial">
+      <div
+        key={i}
+        style={{
+          ...S.card,
+          boxShadow: "0 14px 34px rgba(28,21,51,.16)",
+          animation: "tk-fade-up .35s cubic-bezier(.22,1,.36,1) both",
+        }}
+      >
+        <div style={{ display: "flex", alignItems: "flex-start", gap: 10 }}>
+          <div style={{ fontSize: 22, animation: "tk-float 2.4s ease-in-out infinite" }}>{slide.icon}</div>
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div style={{ fontWeight: 700, fontSize: 13.5 }}>{slide.title}</div>
+            <div style={{ color: C.muted, fontSize: 12, marginTop: 3, lineHeight: 1.5 }}>{slide.text}</div>
+          </div>
+          <button
+            onClick={dismiss}
+            aria-label="Fermer le tutoriel"
+            className="tk-press"
+            style={{ background: "none", border: "none", color: C.muted, fontSize: 16, cursor: "pointer", padding: 0, lineHeight: 1, flexShrink: 0 }}
+          >
+            ×
+          </button>
+        </div>
+        <div style={{ display: "flex", gap: 5, marginTop: 12 }}>
+          {TUTORIAL_SLIDES.map((_, k) => (
+            <div
+              key={k}
+              style={{
+                flex: 1,
+                height: 3,
+                borderRadius: 999,
+                background: k === i ? C.amber : C.line,
+                transition: "background .3s ease",
+              }}
+            />
+          ))}
+        </div>
+      </div>
     </div>
   );
 }
@@ -1395,13 +1579,41 @@ function Contact({ onBack }) {
 }
 
 /* ============================ Connexion / Création de compte ============================ */
-function Auth({ role, onBack, onDone }) {
+function GoogleButton({ busy, onClick }) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      disabled={busy}
+      className="tk-press"
+      style={{
+        ...S.btnGhost,
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        gap: 10,
+        opacity: busy ? 0.6 : 1,
+      }}
+    >
+      <svg width="17" height="17" viewBox="0 0 18 18" aria-hidden>
+        <path fill="#4285F4" d="M17.64 9.2c0-.64-.06-1.25-.16-1.84H9v3.48h4.84a4.14 4.14 0 0 1-1.8 2.72v2.26h2.9c1.7-1.57 2.7-3.87 2.7-6.62z" />
+        <path fill="#34A853" d="M9 18c2.43 0 4.47-.8 5.96-2.18l-2.9-2.26c-.8.54-1.84.86-3.06.86-2.35 0-4.34-1.59-5.05-3.72H.9v2.33A9 9 0 0 0 9 18z" />
+        <path fill="#FBBC05" d="M3.95 10.7A5.4 5.4 0 0 1 3.67 9c0-.59.1-1.17.28-1.7V4.97H.9A9 9 0 0 0 0 9c0 1.45.35 2.83.9 4.03z" />
+        <path fill="#EA4335" d="M9 3.58c1.32 0 2.5.45 3.44 1.35l2.58-2.58C13.46.9 11.43 0 9 0A9 9 0 0 0 .9 4.97L3.95 7.3C4.66 5.17 6.65 3.58 9 3.58z" />
+      </svg>
+      Continuer avec Google
+    </button>
+  );
+}
+
+function Auth({ role, onBack, onDone, onForgotPassword }) {
   const [mode, setMode] = useState("login");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [name, setName] = useState("");
   const [phone, setPhone] = useState("");
   const [busy, setBusy] = useState(false);
+  const [googleBusy, setGoogleBusy] = useState(false);
   const [err, setErr] = useState("");
 
   const title = role === "organizer" ? "Compte organisateur" : "Compte client";
@@ -1420,6 +1632,18 @@ function Auth({ role, onBack, onDone }) {
       setErr(e.message || "Une erreur est survenue.");
     } finally {
       setBusy(false);
+    }
+  };
+
+  const withGoogle = async () => {
+    setErr("");
+    setGoogleBusy(true);
+    try {
+      await signInWithGoogle();
+      // La page redirige vers Google — rien d'autre à faire ici.
+    } catch (e) {
+      setErr(e.message || "Connexion Google indisponible.");
+      setGoogleBusy(false);
     }
   };
 
@@ -1458,6 +1682,13 @@ function Auth({ role, onBack, onDone }) {
             ))}
           </div>
 
+          <GoogleButton busy={googleBusy} onClick={withGoogle} />
+          <div style={{ display: "flex", alignItems: "center", gap: 10, margin: "16px 0" }}>
+            <div style={{ flex: 1, height: 1, background: C.line }} />
+            <div style={{ color: C.muted, fontSize: 11.5, textTransform: "uppercase", letterSpacing: 1 }}>ou</div>
+            <div style={{ flex: 1, height: 1, background: C.line }} />
+          </div>
+
           {mode === "signup" && (
             <>
               <label style={S.label}>{role === "organizer" ? "Nom ou nom de scène" : "Nom complet"}</label>
@@ -1484,6 +1715,28 @@ function Auth({ role, onBack, onDone }) {
             onKeyDown={(e) => e.key === "Enter" && submit()}
           />
 
+          {mode === "login" && (
+            <button
+              type="button"
+              onClick={onForgotPassword}
+              className="tk-press"
+              style={{
+                background: "none",
+                border: "none",
+                color: C.muted,
+                fontSize: 12.5,
+                cursor: "pointer",
+                fontFamily: "'Space Grotesk', sans-serif",
+                padding: 0,
+                marginBottom: 14,
+                textDecoration: "underline",
+                textUnderlineOffset: 3,
+              }}
+            >
+              Mot de passe oublié ?
+            </button>
+          )}
+
           {err && <div style={{ color: C.pink, fontSize: 13, marginBottom: 12 }}>{err}</div>}
 
           <button className="tk-press" style={{ ...S.btn, opacity: ok && !busy ? 1 : 0.4 }} disabled={!ok || busy} onClick={submit}>
@@ -1495,6 +1748,192 @@ function Auth({ role, onBack, onDone }) {
               Les fonds des ventes sont reversés sur ce numéro. Tu ne verras que tes propres événements.
             </div>
           )}
+        </div>
+      </Reveal>
+    </div>
+  );
+}
+
+function ForgotPassword({ onBack }) {
+  const [email, setEmail] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+  const [sent, setSent] = useState(false);
+
+  const submit = async () => {
+    if (!email.trim() || busy) return;
+    setErr("");
+    setBusy(true);
+    try {
+      await sendPasswordReset(email.trim());
+      setSent(true);
+    } catch (e) {
+      setErr(e.message || "Échec de l'envoi — réessaie.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div>
+      <Top title="Mot de passe oublié" onBack={onBack} />
+      <Reveal i={0}>
+        <div style={S.card}>
+          {sent ? (
+            <div style={{ color: C.text, fontSize: 14.5, lineHeight: 1.7 }}>
+              Si un compte existe pour <b>{email}</b>, un lien de réinitialisation vient d'être envoyé. Vérifie ta
+              boîte mail (et les spams).
+            </div>
+          ) : (
+            <>
+              <div style={{ color: C.muted, fontSize: 13.5, marginBottom: 14, lineHeight: 1.5 }}>
+                Indique l'email de ton compte, on t'envoie un lien pour choisir un nouveau mot de passe.
+              </div>
+              <label style={S.label}>Email</label>
+              <input
+                style={S.input}
+                type="email"
+                value={email}
+                onChange={(e) => setEmail(e.target.value)}
+                placeholder="toi@email.com"
+                onKeyDown={(e) => e.key === "Enter" && submit()}
+              />
+              {err && <div style={{ color: C.pink, fontSize: 13, marginBottom: 12 }}>{err}</div>}
+              <button className="tk-press" style={{ ...S.btn, opacity: email.trim() && !busy ? 1 : 0.4 }} disabled={!email.trim() || busy} onClick={submit}>
+                {busy ? "Envoi…" : "Envoyer le lien"}
+              </button>
+            </>
+          )}
+        </div>
+      </Reveal>
+    </div>
+  );
+}
+
+function ResetPassword({ onDone }) {
+  const [password, setPassword] = useState("");
+  const [confirm, setConfirm] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+
+  const ok = password.length >= 6 && password === confirm;
+
+  const submit = async () => {
+    if (!ok || busy) return;
+    setErr("");
+    setBusy(true);
+    try {
+      await updatePassword(password);
+      window.history.replaceState({}, "", "/");
+      const p = await getSessionProfile();
+      onDone(p);
+    } catch (e) {
+      setErr(e.message || "Échec — réessaie.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div>
+      <Top title="Nouveau mot de passe" />
+      <Reveal i={0}>
+        <div style={S.card}>
+          <label style={S.label}>Nouveau mot de passe</label>
+          <input style={S.input} type="password" value={password} onChange={(e) => setPassword(e.target.value)} placeholder="6 caractères minimum" />
+          <label style={S.label}>Confirmer</label>
+          <input
+            style={S.input}
+            type="password"
+            value={confirm}
+            onChange={(e) => setConfirm(e.target.value)}
+            placeholder="Retape le mot de passe"
+            onKeyDown={(e) => e.key === "Enter" && submit()}
+          />
+          {confirm && password !== confirm && (
+            <div style={{ color: C.pink, fontSize: 13, marginBottom: 12 }}>Les mots de passe ne correspondent pas.</div>
+          )}
+          {err && <div style={{ color: C.pink, fontSize: 13, marginBottom: 12 }}>{err}</div>}
+          <button className="tk-press" style={{ ...S.btn, opacity: ok && !busy ? 1 : 0.4 }} disabled={!ok || busy} onClick={submit}>
+            {busy ? "Enregistrement…" : "Enregistrer et continuer"}
+          </button>
+        </div>
+      </Reveal>
+    </div>
+  );
+}
+
+function CompleteProfile({ pendingUser, onDone }) {
+  const [role, setRole] = useState("client");
+  const [name, setName] = useState(pendingUser.name || "");
+  const [phone, setPhone] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+
+  const ok = name.trim() && phone.trim();
+
+  const submit = async () => {
+    if (!ok || busy) return;
+    setErr("");
+    setBusy(true);
+    try {
+      const profile = await createProfileForCurrentUser({ role, name: name.trim(), phone: phone.trim() });
+      await onDone(profile);
+    } catch (e) {
+      setErr(e.message || "Échec — réessaie.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div>
+      <Top title="Finalise ton compte" />
+      <Reveal i={0}>
+        <div style={S.card}>
+          <div style={{ color: C.muted, fontSize: 13.5, marginBottom: 16, lineHeight: 1.5 }}>
+            Connecté avec <b style={{ color: C.text }}>{pendingUser.email}</b>. Encore quelques infos pour finaliser
+            ton compte.
+          </div>
+
+          <label style={S.label}>Type de compte</label>
+          <div style={{ display: "flex", gap: 8, marginBottom: 16 }}>
+            {[
+              { id: "organizer", label: "Organisateur" },
+              { id: "client", label: "Client" },
+            ].map((r) => (
+              <button
+                key={r.id}
+                onClick={() => setRole(r.id)}
+                className="tk-press"
+                style={{
+                  flex: 1,
+                  padding: "10px",
+                  borderRadius: 10,
+                  border: `1px solid ${C.line}`,
+                  background: role === r.id ? C.amber : C.surface2,
+                  color: role === r.id ? C.amberDark : C.text,
+                  fontWeight: 700,
+                  fontSize: 13.5,
+                  cursor: "pointer",
+                  fontFamily: "'Space Grotesk', sans-serif",
+                }}
+              >
+                {r.label}
+              </button>
+            ))}
+          </div>
+
+          <label style={S.label}>{role === "organizer" ? "Nom ou nom de scène" : "Nom complet"}</label>
+          <input style={S.input} value={name} onChange={(e) => setName(e.target.value)} placeholder="Ton nom" />
+          <label style={S.label}>{role === "organizer" ? "Numéro mobile money (encaissements)" : "Numéro de téléphone"}</label>
+          <input style={S.input} value={phone} onChange={(e) => setPhone(e.target.value)} placeholder="06 XXX XX XX" inputMode="tel" />
+
+          {err && <div style={{ color: C.pink, fontSize: 13, marginBottom: 12 }}>{err}</div>}
+
+          <button className="tk-press" style={{ ...S.btn, opacity: ok && !busy ? 1 : 0.4 }} disabled={!ok || busy} onClick={submit}>
+            {busy ? "Un instant…" : "Terminer"}
+          </button>
         </div>
       </Reveal>
     </div>
@@ -1653,40 +2092,42 @@ function CreatorDash({ profile, events, onLogout, onNew, onOpen }) {
           </div>
         </Reveal>
       ) : (
-        <div style={{ display: "grid", gap: 12 }}>
-          <div style={S.label}>Mes événements</div>
-          {mine.map((e, i) => {
-            const p = totalCap(e) ? Math.round((totalSold(e) / totalCap(e)) * 100) : 0;
-            return (
-              <Reveal key={e.code} i={6 + i}>
-                <button
-                  onClick={() => onOpen(e.code)}
-                  className="tk-press tk-lift"
-                  style={{ ...S.card, textAlign: "left", cursor: "pointer", color: C.text, width: "100%" }}
-                >
-                  <div style={{ display: "flex", justifyContent: "space-between", gap: 10 }}>
-                    <div style={{ fontWeight: 700, fontSize: 15 }}>{e.name}</div>
-                    <div style={{ color: C.amber, fontWeight: 700, fontSize: 13, whiteSpace: "nowrap" }}>
-                      {totalSold(e)}/{totalCap(e)}
+        <div>
+          <div style={{ ...S.label, marginBottom: 12 }}>Mes événements</div>
+          <div className="tk-list-grid">
+            {mine.map((e, i) => {
+              const p = totalCap(e) ? Math.round((totalSold(e) / totalCap(e)) * 100) : 0;
+              return (
+                <Reveal key={e.code} i={6 + i}>
+                  <button
+                    onClick={() => onOpen(e.code)}
+                    className="tk-press tk-lift"
+                    style={{ ...S.card, textAlign: "left", cursor: "pointer", color: C.text, width: "100%" }}
+                  >
+                    <div style={{ display: "flex", justifyContent: "space-between", gap: 10 }}>
+                      <div style={{ fontWeight: 700, fontSize: 15 }}>{e.name}</div>
+                      <div style={{ color: C.amber, fontWeight: 700, fontSize: 13, whiteSpace: "nowrap" }}>
+                        {totalSold(e)}/{totalCap(e)}
+                      </div>
                     </div>
-                  </div>
-                  <div style={{ color: C.muted, fontSize: 13, margin: "4px 0 10px" }}>
-                    {e.date} · {e.venue}, {e.city}
-                  </div>
-                  <div style={{ background: C.surface2, borderRadius: 999, height: 6, overflow: "hidden" }}>
-                    <div
-                      style={{
-                        width: p + "%",
-                        height: "100%",
-                        background: `linear-gradient(90deg, ${C.amber}, ${C.pink})`,
-                        transition: "width .9s cubic-bezier(.22,1,.36,1)",
-                      }}
-                    />
-                  </div>
-                </button>
-              </Reveal>
-            );
-          })}
+                    <div style={{ color: C.muted, fontSize: 13, margin: "4px 0 10px" }}>
+                      {e.date} · {e.venue}, {e.city}
+                    </div>
+                    <div style={{ background: C.surface2, borderRadius: 999, height: 6, overflow: "hidden" }}>
+                      <div
+                        style={{
+                          width: p + "%",
+                          height: "100%",
+                          background: `linear-gradient(90deg, ${C.amber}, ${C.pink})`,
+                          transition: "width .9s cubic-bezier(.22,1,.36,1)",
+                        }}
+                      />
+                    </div>
+                  </button>
+                </Reveal>
+              );
+            })}
+          </div>
         </div>
       )}
     </div>
@@ -2902,7 +3343,7 @@ function ClientDash({ profile, events, onLogout, onOpenEvent, onOpenedNew, notif
 
       {shown.length > 0 && (
         <div style={{ marginBottom: 20 }}>
-          <div style={{ display: "grid", gap: 14 }}>
+          <div className="tk-list-grid">
             {shown.map((t, i) => (
               <TicketCard
                 key={t.id}
@@ -2921,7 +3362,7 @@ function ClientDash({ profile, events, onLogout, onOpenEvent, onOpenedNew, notif
         (list.length > 0 ? (
           <div style={{ marginBottom: 20 }}>
             <div style={{ ...S.label, marginBottom: 12 }}>Mes événements</div>
-            <div style={{ display: "grid", gap: 12 }}>
+            <div className="tk-list-grid">
               {list.map((e, i) => (
                 <Reveal key={e.code} i={i}>
                   <button
