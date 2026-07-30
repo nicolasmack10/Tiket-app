@@ -94,8 +94,7 @@ const ANIM_CSS = `
 .tk-home-grid { display: grid; gap: 14px; margin-top: 26px; }
 @media (min-width: 520px) { .tk-home-grid { grid-template-columns: repeat(2, 1fr); } }
 
-.tk-tutorial { position: fixed; top: 18px; right: 18px; width: 250px; z-index: 40; }
-@media (max-width: 640px) { .tk-tutorial { display: none; } }
+.tk-tutorial { width: 100%; max-width: 300px; margin: 4px 0 0 auto; }
 
 .tk-countdown { display: flex; gap: 8px; flex-wrap: wrap; }
 .tk-countdown > div { flex: 1; min-width: 56px; }
@@ -1305,86 +1304,92 @@ export default function TikeApp() {
 /* ============================ Accueil ============================ */
 function Home({ onPickRole, onNav }) {
   return (
-    <div style={{ maxWidth: 640, margin: "0 auto", minHeight: "calc(100vh - 40px)", display: "flex", flexDirection: "column" }}>
+    <div style={{ minHeight: "calc(100vh - 40px)", display: "flex", flexDirection: "column" }}>
       <Reveal i={0}>
-        <div style={{ padding: "44px 0 8px" }}>
-          <div
-            style={{
-              fontFamily: "'Unbounded', sans-serif",
-              fontWeight: 900,
-              fontSize: 40,
-              lineHeight: 1,
-              letterSpacing: -1,
-            }}
-          >
-            TIKÉ
-            <span style={{ color: C.amber, display: "inline-block", animation: "tk-float 2.6s ease-in-out infinite" }}>.</span>
-          </div>
-          <div style={{ color: C.muted, marginTop: 10, fontSize: 15, lineHeight: 1.5 }}>
+        <div
+          style={{
+            fontFamily: "'Unbounded', sans-serif",
+            fontWeight: 900,
+            fontSize: 40,
+            lineHeight: 1,
+            letterSpacing: -1,
+            padding: "44px 0 0",
+          }}
+        >
+          TIKÉ
+          <span style={{ color: C.amber, display: "inline-block", animation: "tk-float 2.6s ease-in-out infinite" }}>.</span>
+        </div>
+      </Reveal>
+
+      <div style={{ maxWidth: 640, width: "100%", margin: "0 auto", display: "flex", flexDirection: "column", flex: 1 }}>
+        <Reveal i={0}>
+          <div style={{ color: C.muted, marginTop: 10, padding: "0 0 8px", fontSize: 15, lineHeight: 1.5 }}>
             Crée ton événement, partage le lien, encaisse par mobile money. Pas de vitrine publique — ton lien, ton
             public.
           </div>
-        </div>
-      </Reveal>
-
-      <div className="tk-home-grid">
-        <Reveal i={1}>
-          <button
-            onClick={() => onPickRole("organizer")}
-            className="tk-press tk-lift"
-            style={{ ...S.card, textAlign: "left", cursor: "pointer", color: C.text, width: "100%" }}
-          >
-            <div style={{ fontSize: 26 }}>🎤</div>
-            <div style={{ fontFamily: "'Unbounded', sans-serif", fontWeight: 700, fontSize: 16, margin: "8px 0 4px" }}>
-              Je suis organisateur
-            </div>
-            <div style={{ color: C.muted, fontSize: 13.5 }}>Créer un événement et vendre des billets</div>
-          </button>
         </Reveal>
 
-        <Reveal i={2}>
-          <button
-            onClick={() => onPickRole("client")}
-            className="tk-press tk-lift"
-            style={{ ...S.card, textAlign: "left", cursor: "pointer", color: C.text, width: "100%" }}
-          >
-            <div style={{ fontSize: 26 }}>🎟️</div>
-            <div style={{ fontFamily: "'Unbounded', sans-serif", fontWeight: 700, fontSize: 16, margin: "8px 0 4px" }}>Je suis client</div>
-            <div style={{ color: C.muted, fontSize: 13.5 }}>Ouvrir un événement et retrouver mes billets</div>
-          </button>
+        <div className="tk-home-grid">
+          <Reveal i={1}>
+            <button
+              onClick={() => onPickRole("organizer")}
+              className="tk-press tk-lift"
+              style={{ ...S.card, textAlign: "left", cursor: "pointer", color: C.text, width: "100%" }}
+            >
+              <div style={{ fontSize: 26 }}>🎤</div>
+              <div style={{ fontFamily: "'Unbounded', sans-serif", fontWeight: 700, fontSize: 16, margin: "8px 0 4px" }}>
+                Je suis organisateur
+              </div>
+              <div style={{ color: C.muted, fontSize: 13.5 }}>Créer un événement et vendre des billets</div>
+            </button>
+          </Reveal>
+
+          <Reveal i={2}>
+            <button
+              onClick={() => onPickRole("client")}
+              className="tk-press tk-lift"
+              style={{ ...S.card, textAlign: "left", cursor: "pointer", color: C.text, width: "100%" }}
+            >
+              <div style={{ fontSize: 26 }}>🎟️</div>
+              <div style={{ fontFamily: "'Unbounded', sans-serif", fontWeight: 700, fontSize: 16, margin: "8px 0 4px" }}>Je suis client</div>
+              <div style={{ color: C.muted, fontSize: 13.5 }}>Ouvrir un événement et retrouver mes billets</div>
+            </button>
+          </Reveal>
+        </div>
+
+        <Reveal i={2.5}>
+          <TutorialCorner />
+        </Reveal>
+
+        <Reveal i={3} style={{ marginTop: "auto" }}>
+          <div style={{ display: "flex", justifyContent: "center", gap: 18, paddingTop: 34, flexWrap: "wrap" }}>
+            {[
+              { id: "faq", label: "FAQ" },
+              { id: "about", label: "À propos" },
+              { id: "contact", label: "Nous contacter" },
+            ].map((p) => (
+              <button
+                key={p.id}
+                onClick={() => onNav(p.id)}
+                className="tk-press"
+                style={{
+                  background: "none",
+                  border: "none",
+                  color: C.muted,
+                  fontSize: 13,
+                  fontWeight: 700,
+                  cursor: "pointer",
+                  fontFamily: "'Space Grotesk', sans-serif",
+                  textDecoration: "underline",
+                  textUnderlineOffset: 3,
+                }}
+              >
+                {p.label}
+              </button>
+            ))}
+          </div>
         </Reveal>
       </div>
-
-      <Reveal i={3} style={{ marginTop: "auto" }}>
-        <div style={{ display: "flex", justifyContent: "center", gap: 18, paddingTop: 34, flexWrap: "wrap" }}>
-          {[
-            { id: "faq", label: "FAQ" },
-            { id: "about", label: "À propos" },
-            { id: "contact", label: "Nous contacter" },
-          ].map((p) => (
-            <button
-              key={p.id}
-              onClick={() => onNav(p.id)}
-              className="tk-press"
-              style={{
-                background: "none",
-                border: "none",
-                color: C.muted,
-                fontSize: 13,
-                fontWeight: 700,
-                cursor: "pointer",
-                fontFamily: "'Space Grotesk', sans-serif",
-                textDecoration: "underline",
-                textUnderlineOffset: 3,
-              }}
-            >
-              {p.label}
-            </button>
-          ))}
-        </div>
-      </Reveal>
-
-      <TutorialCorner />
     </div>
   );
 }
