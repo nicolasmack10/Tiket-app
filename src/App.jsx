@@ -166,6 +166,7 @@ const WIDE_VIEWS = new Set([
   "adminOrganizers",
   "adminClients",
   "adminEvents",
+  "adminFinance",
 ]);
 
 const activeBuyers = (ev) => ev.buyers.filter((b) => !b.cancelled);
@@ -1222,6 +1223,17 @@ export default function TikeApp() {
                 data={adminData}
                 onBack={() => setView("adminDash")}
                 onOpen={(code) => {
+                  setActiveCode(code);
+                  setView("adminEventDetail");
+                }}
+              />
+            )}
+            {view === "adminFinance" && adminData && (
+              <AdminFinance
+                data={adminData}
+                onBack={() => setView("adminDash")}
+                notify={notify}
+                onOpenEvent={(code) => {
                   setActiveCode(code);
                   setView("adminEventDetail");
                 }}
@@ -3854,11 +3866,58 @@ function AdminOverview({ profile, data, onLogout, onNav, notify }) {
   const { profiles, events } = data;
   const organizers = profiles.filter((p) => p.role === "organizer");
   const clients = profiles.filter((p) => p.role === "client");
+  const totalAvailable = events.reduce((s, e) => s + availableFunds(e), 0);
+
+  return (
+    <div>
+      <Top title={`Admin — ${profile.name}`} right={<LogoutButton onClick={onLogout} />} />
+
+      {/* Navigation vers les autres pages admin */}
+      <Reveal i={0}>
+        <div style={{ display: "grid", gap: 12, marginBottom: 20 }}>
+          {[
+            { id: "adminFinance", icon: "💰", label: "Finances", count: `${fmtShort(totalAvailable)} FCFA disponibles` },
+            { id: "adminOrganizers", icon: "🎤", label: "Organisateurs", count: `${organizers.length} au total` },
+            { id: "adminClients", icon: "🎟️", label: "Clients", count: `${clients.length} au total` },
+            { id: "adminEvents", icon: "📅", label: "Événements", count: `${events.length} au total` },
+          ].map((x) => (
+            <button
+              key={x.id}
+              onClick={() => onNav(x.id)}
+              className="tk-press tk-lift"
+              style={{ ...S.card, display: "flex", alignItems: "center", gap: 14, textAlign: "left", cursor: "pointer", color: C.text, width: "100%" }}
+            >
+              <div style={{ fontSize: 24 }}>{x.icon}</div>
+              <div style={{ flex: 1 }}>
+                <div style={{ fontWeight: 700, fontSize: 15 }}>{x.label}</div>
+                <div style={{ color: C.muted, fontSize: 12.5 }}>{x.count}</div>
+              </div>
+              <div style={{ color: C.muted, fontSize: 18 }}>→</div>
+            </button>
+          ))}
+        </div>
+      </Reveal>
+    </div>
+  );
+}
+
+function AdminFinance({ data, onBack, onOpenEvent, notify }) {
+  const { profiles, events } = data;
+  const organizers = profiles.filter((p) => p.role === "organizer");
 
   const totalRevenue = events.reduce((s, e) => s + revenue(e), 0);
   const totalCommission = events.reduce((s, e) => s + commissionAmount(e), 0);
+  const totalNet = events.reduce((s, e) => s + netRevenue(e), 0);
+  const totalWithdrawn = events.reduce((s, e) => s + withdrawnTotal(e), 0);
+  const totalAvailable = events.reduce((s, e) => s + availableFunds(e), 0);
   const totalTickets = events.reduce((s, e) => s + totalSold(e), 0);
   const revAnim = useCountUp(totalCommission);
+
+  const allWithdrawals = events
+    .flatMap((e) => (e.withdrawals || []).map((w) => ({ ...w, eventName: e.name })))
+    .sort((a, b) => b.ts - a.ts);
+
+  const sortedEvents = events.slice().sort((a, b) => availableFunds(b) - availableFunds(a));
 
   const exportCommissionsCSV = () => {
     const rows = [["Organisateur", "Téléphone", "Événements", "Revenu brut (FCFA)", "Commission (FCFA)"]];
@@ -3881,7 +3940,7 @@ function AdminOverview({ profile, data, onLogout, onNav, notify }) {
 
   return (
     <div>
-      <Top title={`Admin — ${profile.name}`} right={<LogoutButton onClick={onLogout} />} />
+      <Top title="Finances" onBack={onBack} />
 
       {/* Commissions plateforme */}
       <Reveal i={0}>
@@ -3898,35 +3957,109 @@ function AdminOverview({ profile, data, onLogout, onNav, notify }) {
         </div>
       </Reveal>
 
-      {/* Navigation vers les autres pages admin */}
       <Reveal i={1}>
-        <div style={{ display: "grid", gap: 12, marginBottom: 20 }}>
+        <div className="tk-kpi-grid">
           {[
-            { id: "adminOrganizers", icon: "🎤", label: "Organisateurs", count: organizers.length },
-            { id: "adminClients", icon: "🎟️", label: "Clients", count: clients.length },
-            { id: "adminEvents", icon: "📅", label: "Événements", count: events.length },
+            { k: "Reversé aux organisateurs", v: fmtShort(totalNet), c: C.text },
+            { k: "Déjà retiré", v: fmtShort(totalWithdrawn), c: C.blue },
+            { k: "Disponible (non retiré)", v: fmtShort(totalAvailable), c: C.amber },
           ].map((x) => (
-            <button
-              key={x.id}
-              onClick={() => onNav(x.id)}
-              className="tk-press tk-lift"
-              style={{ ...S.card, display: "flex", alignItems: "center", gap: 14, textAlign: "left", cursor: "pointer", color: C.text, width: "100%" }}
-            >
-              <div style={{ fontSize: 24 }}>{x.icon}</div>
-              <div style={{ flex: 1 }}>
-                <div style={{ fontWeight: 700, fontSize: 15 }}>{x.label}</div>
-                <div style={{ color: C.muted, fontSize: 12.5 }}>{x.count} au total</div>
+            <div key={x.k} style={{ ...S.card, padding: 14, textAlign: "center" }}>
+              <div style={{ fontFamily: "'Unbounded', sans-serif", fontWeight: 700, fontSize: 17, color: x.c }}>{x.v}</div>
+              <div style={{ fontSize: 9.5, color: C.muted, letterSpacing: 0.5, textTransform: "uppercase", fontWeight: 700, marginTop: 4 }}>
+                {x.k}
               </div>
-              <div style={{ color: C.muted, fontSize: 18 }}>→</div>
-            </button>
+            </div>
           ))}
         </div>
       </Reveal>
 
       <Reveal i={2}>
-        <button className="tk-press" style={S.btnGhost} onClick={exportCommissionsCSV}>
+        <button className="tk-press" style={{ ...S.btnGhost, marginBottom: 20 }} onClick={exportCommissionsCSV}>
           ⬇ Exporter les commissions par organisateur (CSV)
         </button>
+      </Reveal>
+
+      {/* Fonds par événement */}
+      <Reveal i={3}>
+        <div style={{ ...S.card, marginBottom: 14 }}>
+          <div style={S.label}>Fonds disponibles par événement</div>
+          {sortedEvents.length === 0 ? (
+            <div style={{ color: C.muted, fontSize: 13.5 }}>Aucun événement pour l'instant.</div>
+          ) : (
+            sortedEvents.map((e, i) => {
+              const org = profiles.find((p) => p.id === e.creatorId);
+              return (
+                <button
+                  key={e.code}
+                  onClick={() => onOpenEvent(e.code)}
+                  className="tk-press"
+                  style={{
+                    width: "100%",
+                    background: "none",
+                    border: "none",
+                    padding: 0,
+                    cursor: "pointer",
+                    textAlign: "left",
+                    fontFamily: "'Space Grotesk', sans-serif",
+                    color: C.text,
+                    display: "block",
+                  }}
+                >
+                  <div
+                    style={{
+                      display: "flex",
+                      justifyContent: "space-between",
+                      alignItems: "center",
+                      gap: 10,
+                      padding: "12px 0",
+                      borderBottom: i < sortedEvents.length - 1 ? `1px solid ${C.line}` : "none",
+                    }}
+                  >
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div style={{ fontWeight: 700, fontSize: 14, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+                        {e.name}
+                      </div>
+                      <div style={{ color: C.muted, fontSize: 12 }}>
+                        {org ? org.name : "—"} · {fmtFCFA(revenue(e))} brut
+                      </div>
+                    </div>
+                    <div style={{ textAlign: "right", flexShrink: 0 }}>
+                      <div style={{ fontWeight: 700, color: availableFunds(e) > 0 ? C.amber : C.muted }}>{fmtFCFA(availableFunds(e))}</div>
+                      <div style={{ color: C.muted, fontSize: 11 }}>disponible</div>
+                    </div>
+                  </div>
+                </button>
+              );
+            })
+          )}
+        </div>
+      </Reveal>
+
+      {/* Historique des retraits */}
+      <Reveal i={4}>
+        <div style={S.card}>
+          <div style={S.label}>Historique des retraits ({allWithdrawals.length})</div>
+          {allWithdrawals.length === 0 ? (
+            <div style={{ color: C.muted, fontSize: 13.5 }}>Aucun retrait effectué pour l'instant.</div>
+          ) : (
+            allWithdrawals.map((w, i) => (
+              <div
+                key={w.id}
+                style={{ padding: "10px 0", borderBottom: i < allWithdrawals.length - 1 ? `1px solid ${C.line}` : "none" }}
+              >
+                <div style={{ display: "flex", justifyContent: "space-between", fontSize: 14, gap: 10 }}>
+                  <div style={{ fontWeight: 700, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{w.eventName}</div>
+                  <div style={{ color: C.green, fontWeight: 700, flexShrink: 0 }}>{fmtFCFA(w.amount)}</div>
+                </div>
+                <div style={{ color: C.muted, fontSize: 12 }}>
+                  {w.phone} · {fmtDateTime(w.ts)}
+                </div>
+                {w.reason && <div style={{ color: C.muted, fontSize: 12, marginTop: 2, fontStyle: "italic" }}>« {w.reason} »</div>}
+              </div>
+            ))
+          )}
+        </div>
       </Reveal>
     </div>
   );
