@@ -137,6 +137,20 @@ const genCode = (len = 6) => {
   return s;
 };
 
+// Préfixe des billets : 3 premières lettres du nom de l'événement (accents
+// retirés, complété par des X si le nom est trop court) — le code aléatoire
+// qui suit garantit l'unicité au sein de l'événement.
+const ticketPrefix = (name) => {
+  const letters = (name || "")
+    .normalize("NFD")
+    .replace(/[^A-Za-z]/g, "")
+    .toUpperCase();
+  return (letters + "XXX").slice(0, 3);
+};
+
+const fmtDateTime = (ts) =>
+  new Date(ts).toLocaleString("fr-FR", { day: "2-digit", month: "2-digit", year: "numeric", hour: "2-digit", minute: "2-digit" });
+
 const codeFromPath = () => {
   const m = window.location.pathname.match(/^\/e\/([A-Za-z0-9]+)/);
   return m ? m[1].toUpperCase() : null;
@@ -666,7 +680,7 @@ function TicketCard({ t, i = 0, muted = false, refundStatus, onRequestRefund }) 
             crossOrigin="anonymous"
             src={t.posterUrl}
             alt=""
-            style={{ width: "100%", height: 110, objectFit: "cover", display: "block" }}
+            style={{ width: "100%", aspectRatio: "16 / 9", objectFit: "cover", objectPosition: "center", display: "block" }}
           />
         )}
         <div style={{ padding: "18px 20px 16px" }}>
@@ -793,6 +807,7 @@ export default function TikeApp() {
   const [activeCode, setActiveCode] = useState(null);
   const [toast, setToast] = useState(null);
   const [loading, setLoading] = useState(true);
+  const [purchaseWarning, setPurchaseWarning] = useState(false);
 
   const notify = (msg) => {
     setToast(msg);
@@ -1264,7 +1279,8 @@ export default function TikeApp() {
                 profile={profile}
                 onBack={() => setView("kEvent")}
                 onPaid={async ({ buyerName, buyerPhone, qty, operator, tier }) => {
-                  const ids = Array.from({ length: qty }, () => "TK-" + genCode(4) + "-" + genCode(4));
+                  const prefix = ticketPrefix(ev.name);
+                  const ids = Array.from({ length: qty }, () => `${prefix}-${genCode(6)}`);
                   const buyer = {
                     name: buyerName,
                     phone: buyerPhone,
@@ -1286,6 +1302,7 @@ export default function TikeApp() {
                   await loadClientEvents(profile.id);
                   setView("clientDash");
                   notify("Paiement confirmé — billets reçus 🎟️");
+                  setPurchaseWarning(true);
                 }}
               />
             )}
@@ -1312,6 +1329,21 @@ export default function TikeApp() {
         >
           {toast}
         </div>
+      )}
+      {purchaseWarning && (
+        <Modal title="⚠️ Ne partage jamais ton code" onClose={() => setPurchaseWarning(false)}>
+          <div style={{ color: C.text, fontSize: 14.5, lineHeight: 1.7, marginBottom: 18 }}>
+            Chaque billet n'est scanné <b>qu'une seule fois</b> à l'entrée. Si tu partages ton QR code ou ton
+            numéro de billet avec quelqu'un d'autre, il pourra l'utiliser à ta place — et tu n'auras plus accès à
+            l'événement.
+            <br />
+            <br />
+            Garde ton billet uniquement pour toi jusqu'au jour J.
+          </div>
+          <button className="tk-press" style={S.btn} onClick={() => setPurchaseWarning(false)}>
+            J'ai compris
+          </button>
+        </Modal>
       )}
     </div>
   );
@@ -2305,7 +2337,7 @@ function NewEvent({ profile, onBack, onCreate }) {
             <img
               src={posterPreview}
               alt=""
-              style={{ width: "100%", maxHeight: 220, objectFit: "cover", borderRadius: 12, marginBottom: 12, display: "block" }}
+              style={{ width: "100%", aspectRatio: "16 / 9", objectFit: "cover", objectPosition: "center", borderRadius: 12, marginBottom: 12, display: "block" }}
             />
           )}
           <label
@@ -2463,6 +2495,78 @@ function NewEvent({ profile, onBack, onCreate }) {
   );
 }
 
+// Liste des acheteurs/transactions d'un événement, avec pour chaque billet
+// son statut et son heure de scan — utilisée côté organisateur et admin.
+function BuyersList({ ev, title = "Acheteurs" }) {
+  return (
+    <div style={S.card}>
+      <div style={S.label}>
+        {title} ({ev.buyers.length})
+      </div>
+      {ev.buyers.length === 0 ? (
+        <div style={{ color: C.muted, fontSize: 13.5 }}>Pas encore de ventes.</div>
+      ) : (
+        ev.buyers
+          .slice()
+          .reverse()
+          .map((b, i) => (
+            <div
+              key={i}
+              style={{
+                padding: "12px 0",
+                borderBottom: i < ev.buyers.length - 1 ? `1px solid ${C.line}` : "none",
+                opacity: b.cancelled ? 0.5 : 1,
+              }}
+            >
+              <div style={{ display: "flex", justifyContent: "space-between", fontSize: 14, gap: 10 }}>
+                <div>
+                  <div style={{ fontWeight: 700 }}>
+                    {b.name}
+                    {b.cancelled && (
+                      <span style={{ color: C.pink, fontWeight: 700, fontSize: 11, marginLeft: 8, textTransform: "uppercase" }}>
+                        Annulé
+                      </span>
+                    )}
+                  </div>
+                  <div style={{ color: C.muted, fontSize: 12.5 }}>
+                    {b.phone} · {b.operator}
+                  </div>
+                </div>
+                <div style={{ textAlign: "right" }}>
+                  <div style={{ color: C.amber, fontWeight: 700 }}>
+                    {b.qty} × {b.tierName}
+                  </div>
+                  <div style={{ color: C.muted, fontSize: 12.5 }}>{fmtFCFA(b.qty * b.unitPrice)}</div>
+                </div>
+              </div>
+              <div style={{ color: C.muted, fontSize: 11, marginTop: 4 }}>Achat le {fmtDateTime(b.ts)}</div>
+              <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginTop: 8 }}>
+                {b.ids.map((t) => {
+                  const usedAt = ev.used && ev.used[t.id];
+                  return (
+                    <div
+                      key={t.id}
+                      style={{
+                        fontSize: 11,
+                        fontWeight: 700,
+                        padding: "4px 8px",
+                        borderRadius: 999,
+                        background: usedAt ? "rgba(52,199,89,.14)" : C.surface2,
+                        color: usedAt ? C.green : C.muted,
+                      }}
+                    >
+                      N°{t.rank} — {usedAt ? `Scanné à ${fmtDateTime(usedAt)}` : "Non scanné"}
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          ))
+      )}
+    </div>
+  );
+}
+
 /* ---------- TABLEAU DE BORD ÉVÉNEMENT ---------- */
 function CreatorEvent({ ev, onBack, onScan, notify, onWithdraw }) {
   const [withdrawing, setWithdrawing] = useState(false);
@@ -2588,7 +2692,7 @@ function CreatorEvent({ ev, onBack, onScan, notify, onWithdraw }) {
           <img
             src={ev.posterUrl}
             alt=""
-            style={{ width: "100%", display: "block", maxHeight: 200, objectFit: "cover", borderRadius: 18, marginBottom: 14 }}
+            style={{ width: "100%", display: "block", aspectRatio: "16 / 9", objectFit: "cover", objectPosition: "center", borderRadius: 18, marginBottom: 14 }}
           />
         </Reveal>
       )}
@@ -2912,49 +3016,7 @@ function CreatorEvent({ ev, onBack, onScan, notify, onWithdraw }) {
 
       {/* Acheteurs */}
       <Reveal i={8}>
-        <div style={S.card}>
-          <div style={S.label}>Acheteurs ({ev.buyers.length})</div>
-          {ev.buyers.length === 0 ? (
-            <div style={{ color: C.muted, fontSize: 13.5 }}>Pas encore de ventes. Partage ton lien pour lancer la machine !</div>
-          ) : (
-            ev.buyers
-              .slice()
-              .reverse()
-              .map((b, i) => (
-                <div
-                  key={i}
-                  style={{
-                    display: "flex",
-                    justifyContent: "space-between",
-                    padding: "10px 0",
-                    borderBottom: i < ev.buyers.length - 1 ? `1px solid ${C.line}` : "none",
-                    fontSize: 14,
-                    opacity: b.cancelled ? 0.5 : 1,
-                  }}
-                >
-                  <div>
-                    <div style={{ fontWeight: 700 }}>
-                      {b.name}
-                      {b.cancelled && (
-                        <span style={{ color: C.pink, fontWeight: 700, fontSize: 11, marginLeft: 8, textTransform: "uppercase" }}>
-                          Annulé
-                        </span>
-                      )}
-                    </div>
-                    <div style={{ color: C.muted, fontSize: 12.5 }}>
-                      {b.phone} · {b.operator}
-                    </div>
-                  </div>
-                  <div style={{ textAlign: "right" }}>
-                    <div style={{ color: C.amber, fontWeight: 700 }}>
-                      {b.qty} × {b.tierName}
-                    </div>
-                    <div style={{ color: C.muted, fontSize: 12.5 }}>{fmtFCFA(b.qty * b.unitPrice)}</div>
-                  </div>
-                </div>
-              ))
-          )}
-        </div>
+        <BuyersList ev={ev} title="Acheteurs" />
       </Reveal>
     </div>
   );
@@ -3165,7 +3227,7 @@ function Scanner({ ev, onBack, onMarkUsed, onRefresh }) {
             style={{ ...S.input, textTransform: "uppercase" }}
             value={input}
             onChange={(e) => setInput(e.target.value)}
-            placeholder="TK-XXXX-XXXX"
+            placeholder={`${ticketPrefix(ev.name)}-XXXXXX`}
             onKeyDown={(e) => e.key === "Enter" && check()}
           />
           <button
@@ -4060,7 +4122,7 @@ function AdminEventDetail({ ev, onBack, onDeleteEvent, onSetCommission, notify }
           <img
             src={ev.posterUrl}
             alt=""
-            style={{ width: "100%", display: "block", maxHeight: 200, objectFit: "cover", borderRadius: 18, marginBottom: 14 }}
+            style={{ width: "100%", display: "block", aspectRatio: "16 / 9", objectFit: "cover", objectPosition: "center", borderRadius: 18, marginBottom: 14 }}
           />
         </Reveal>
       )}
@@ -4093,6 +4155,12 @@ function AdminEventDetail({ ev, onBack, onDeleteEvent, onSetCommission, notify }
       </Reveal>
 
       <Reveal i={3}>
+        <div style={{ marginBottom: 14 }}>
+          <BuyersList ev={ev} title="Transactions" />
+        </div>
+      </Reveal>
+
+      <Reveal i={4}>
         <div style={{ ...S.card, marginBottom: 14 }}>
           <div style={S.label}>Commission personnalisée</div>
           <div style={{ color: C.muted, fontSize: 12.5, margin: "8px 0 12px", lineHeight: 1.5 }}>
@@ -4121,7 +4189,7 @@ function AdminEventDetail({ ev, onBack, onDeleteEvent, onSetCommission, notify }
         </div>
       </Reveal>
 
-      <Reveal i={4}>
+      <Reveal i={5}>
         <button className="tk-press" style={{ ...S.btn, background: C.pink, opacity: busy ? 0.6 : 1 }} disabled={busy} onClick={del}>
           {busy ? "…" : "Supprimer l'événement"}
         </button>
