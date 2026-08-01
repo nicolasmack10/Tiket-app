@@ -27,6 +27,8 @@ import {
   fetchRefundRequestsDB,
   fetchMyRefundRequestsDB,
   resolveRefundDB,
+  getTicketSealDB,
+  verifyTicketDB,
 } from "./lib/db";
 import {
   getSessionProfile,
@@ -96,6 +98,37 @@ const ANIM_CSS = `
 
 .tk-tutorial { width: 100%; max-width: 300px; margin: 4px 0 0 auto; }
 
+.tk-ticket-visual {
+  position: relative;
+  width: 100%;
+  aspect-ratio: 2 / 3;
+  border-radius: 24px;
+  overflow: hidden;
+  background: #0E0B1E;
+  -webkit-mask-image:
+    radial-gradient(circle 16px at 0% 32%, transparent 99%, #000 100%),
+    radial-gradient(circle 16px at 100% 32%, transparent 99%, #000 100%);
+  -webkit-mask-composite: source-in;
+  mask-image:
+    radial-gradient(circle 16px at 0% 32%, transparent 99%, #000 100%),
+    radial-gradient(circle 16px at 100% 32%, transparent 99%, #000 100%);
+  mask-composite: intersect;
+}
+.tk-ticket-perf {
+  position: absolute;
+  left: 22px;
+  right: 22px;
+  top: 32%;
+  border-top: 2px dashed rgba(245, 243, 252, 0.4);
+}
+.tk-ticket-panel {
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  background: rgba(10, 10, 26, 0.55);
+  border: 1px solid rgba(255, 255, 255, 0.25);
+  border-radius: 28px;
+}
+
 .tk-countdown { display: flex; gap: 8px; flex-wrap: wrap; }
 .tk-countdown > div { flex: 1; min-width: 56px; }
 
@@ -123,6 +156,18 @@ const C = {
 };
 
 const HERO_GRADIENT = `linear-gradient(140deg, ${C.amber}, ${C.pink})`;
+
+// Palette du billet électronique : intentionnellement sombre (contrairement au
+// thème clair du reste de l'app) pour lire comme une vraie carte/pass, quel
+// que soit le visuel de l'événement affiché derrière.
+const TK = {
+  bg: "#0E0B1E",
+  text: "#F5F3FC",
+  muted: "#C8C4E1",
+  amber: "#FFBE3C",
+  pink: "#FF5D73",
+  green: "#50E696",
+};
 
 const TIER_COLORS = [C.amber, C.pink, C.blue, C.green, "#8B5CF6"];
 
@@ -154,6 +199,14 @@ const fmtDateTime = (ts) =>
 const codeFromPath = () => {
   const m = window.location.pathname.match(/^\/e\/([A-Za-z0-9]+)/);
   return m ? m[1].toUpperCase() : null;
+};
+
+// Lien de vérification scanné à l'entrée : /v/{ticketId}?s={signature}
+const verifyParamsFromPath = () => {
+  const m = window.location.pathname.match(/^\/v\/([A-Za-z0-9-]+)/);
+  if (!m) return null;
+  const signature = new URLSearchParams(window.location.search).get("s") || "";
+  return { ticketId: m[1].toUpperCase(), signature };
 };
 
 // Pages tableau de bord / listes : profitent d'un conteneur pleine largeur sur
@@ -479,7 +532,7 @@ function TicketQR({ value, size = 64 }) {
   const [dataUrl, setDataUrl] = useState(null);
   useEffect(() => {
     let cancelled = false;
-    QRCode.toDataURL(value, { width: size * 6, margin: 1, color: { dark: "#1C1533", light: "#FFFFFF" } })
+    QRCode.toDataURL(value, { width: size * 6, margin: 1, errorCorrectionLevel: "H", color: { dark: "#1C1533", light: "#FFFFFF" } })
       .then((url) => {
         if (!cancelled) setDataUrl(url);
       })
@@ -630,20 +683,35 @@ function TierSplit({ ev }) {
 /* ---------- Carte billet (téléchargeable, QR réel) ---------- */
 function TicketCard({ t, i = 0, muted = false, refundStatus, onRequestRefund }) {
   const cardRef = useRef(null);
-  const actionsRef = useRef(null);
   const [downloading, setDownloading] = useState(false);
   const [requesting, setRequesting] = useState(false);
+  const [seal, setSeal] = useState(null);
+  const [sealErr, setSealErr] = useState(false);
+
+  // Le lien signé (HMAC) + le sceau court sont générés côté serveur, à la
+  // demande, plutôt que stockés : voir get_ticket_seal.
+  useEffect(() => {
+    let cancelled = false;
+    setSeal(null);
+    setSealErr(false);
+    getTicketSealDB(t.id)
+      .then((s) => {
+        if (!cancelled) setSeal(s);
+      })
+      .catch((e) => {
+        console.error(e);
+        if (!cancelled) setSealErr(true);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [t.id]);
 
   const download = async () => {
     if (!cardRef.current || downloading) return;
     setDownloading(true);
     try {
-      const dataUrl = await toPng(cardRef.current, {
-        pixelRatio: 2,
-        backgroundColor: "#FFFFFF",
-        cacheBust: true,
-        filter: (node) => node !== actionsRef.current,
-      });
+      const dataUrl = await toPng(cardRef.current, { pixelRatio: 2, backgroundColor: TK.bg, cacheBust: true });
       const img = new Image();
       await new Promise((resolve, reject) => {
         img.onload = resolve;
@@ -666,74 +734,196 @@ function TicketCard({ t, i = 0, muted = false, refundStatus, onRequestRefund }) 
     setRequesting(false);
   };
 
-  const statusLabel = t.cancelled
-    ? "Billet annulé"
-    : muted
-    ? "Événement passé"
-    : "Billet valide";
-  const statusColor = t.cancelled ? C.pink : C.amber;
+  const isFree = t.unitPrice === 0;
+  const d = t.date ? new Date(`${t.date}T00:00:00`) : null;
+  let dateLabel = "";
+  if (d) {
+    dateLabel = d.toLocaleDateString("fr-FR", { weekday: "long", day: "numeric", month: "long", year: "numeric" });
+    dateLabel = dateLabel.charAt(0).toUpperCase() + dateLabel.slice(1);
+    if (t.time) dateLabel += ` · ${t.time.replace(":", "h")}`;
+  }
+
+  const labelStyle = {
+    fontSize: 9.5,
+    fontWeight: 700,
+    letterSpacing: 1,
+    textTransform: "uppercase",
+    color: TK.muted,
+    textShadow: "0 1px 3px rgba(0,0,0,.6)",
+  };
+  const valueStyle = { fontSize: 13, fontWeight: 700, color: TK.text, marginTop: 3, textShadow: "0 1px 3px rgba(0,0,0,.6)" };
 
   return (
     <Reveal i={i}>
-      <div ref={cardRef} className="tk-lift" style={{ ...S.card, padding: 0, overflow: "hidden", opacity: muted || t.cancelled ? 0.65 : 1 }}>
-        {t.posterUrl && (
-          <img
-            crossOrigin="anonymous"
-            src={t.posterUrl}
-            alt=""
-            style={{ width: "100%", aspectRatio: "16 / 9", objectFit: "cover", objectPosition: "center", display: "block" }}
+      <div style={{ borderRadius: 24, overflow: "hidden", boxShadow: "0 14px 34px rgba(28,21,51,.16)", opacity: muted || t.cancelled ? 0.6 : 1 }}>
+        {/* Visuel du billet — c'est ce qui est exporté en PDF/image */}
+        <div ref={cardRef} className="tk-ticket-visual">
+          {t.posterUrl ? (
+            <img
+              crossOrigin="anonymous"
+              src={t.posterUrl}
+              alt=""
+              style={{ position: "absolute", inset: 0, width: "100%", height: "100%", objectFit: "cover", objectPosition: "top", display: "block" }}
+            />
+          ) : (
+            <div style={{ position: "absolute", inset: 0, background: HERO_GRADIENT }} />
+          )}
+          <div
+            style={{
+              position: "absolute",
+              inset: 0,
+              background: "linear-gradient(to bottom, rgba(10,10,26,0) 0%, rgba(10,10,26,.12) 12%, rgba(10,10,26,.42) 45%, rgba(10,10,26,.82) 100%)",
+            }}
           />
-        )}
-        <div style={{ padding: "18px 20px 16px" }}>
-          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10 }}>
-            <div style={{ fontSize: 11, letterSpacing: 2, textTransform: "uppercase", color: statusColor, fontWeight: 700 }}>
-              {statusLabel}
+
+          {/* Zone haute : logo + badge catégorie */}
+          <div style={{ position: "relative", display: "flex", justifyContent: "space-between", alignItems: "flex-start", padding: "18px 18px 0" }}>
+            <div style={{ fontFamily: "'Unbounded', sans-serif", fontWeight: 900, fontSize: 20, color: TK.amber, textShadow: "0 2px 8px rgba(0,0,0,.55)" }}>
+              TIKÉ<span style={{ color: TK.pink }}>.</span>
             </div>
+            {isFree ? (
+              <div
+                style={{
+                  fontSize: 10.5,
+                  fontWeight: 700,
+                  letterSpacing: 1,
+                  textTransform: "uppercase",
+                  color: TK.green,
+                  background: "rgba(80,230,150,.16)",
+                  border: `1px solid ${TK.green}`,
+                  borderRadius: 999,
+                  padding: "5px 10px",
+                  whiteSpace: "nowrap",
+                  flexShrink: 0,
+                }}
+              >
+                Entrée libre
+              </div>
+            ) : (
+              <div
+                style={{
+                  fontSize: 10.5,
+                  fontWeight: 700,
+                  letterSpacing: 1,
+                  textTransform: "uppercase",
+                  color: TK.amber,
+                  background: "rgba(255,190,60,.16)",
+                  border: `1px solid ${TK.amber}`,
+                  borderRadius: 999,
+                  padding: "5px 10px",
+                  whiteSpace: "nowrap",
+                  flexShrink: 0,
+                }}
+              >
+                {t.tierName}
+              </div>
+            )}
+          </div>
+
+          <div className="tk-ticket-perf" />
+
+          {/* Panneau verre dépoli */}
+          <div className="tk-ticket-panel" style={{ position: "absolute", left: 20, right: 20, bottom: 20, top: "36%", padding: "18px 18px 16px", overflowY: "auto" }}>
+            <div style={{ fontSize: 10.5, fontWeight: 700, letterSpacing: 1.5, textTransform: "uppercase", color: TK.amber, textShadow: "0 1px 3px rgba(0,0,0,.6)" }}>
+              {isFree ? "Laissez-passer" : "Billet"}
+              {t.cancelled && <span style={{ color: TK.pink }}> · Annulé</span>}
+            </div>
+            <div style={{ fontFamily: "'Unbounded', sans-serif", fontWeight: 800, fontSize: 18, color: TK.text, marginTop: 6, lineHeight: 1.25, textShadow: "0 1px 4px rgba(0,0,0,.6)" }}>
+              {t.eventName}
+            </div>
+            <div style={{ fontSize: 12, color: TK.muted, marginTop: 4, textShadow: "0 1px 3px rgba(0,0,0,.6)" }}>
+              Titulaire : <b style={{ color: TK.text }}>{t.buyerName}</b>
+              {t.rank != null && <> · N°{t.rank}</>}
+            </div>
+
+            <div style={{ marginTop: 14 }}>
+              <div style={labelStyle}>Date &amp; heure</div>
+              <div style={valueStyle}>{dateLabel}</div>
+            </div>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14, marginTop: 12 }}>
+              <div>
+                <div style={labelStyle}>Lieu</div>
+                <div style={valueStyle}>
+                  {t.venue}
+                  {t.city ? `, ${t.city}` : ""}
+                </div>
+              </div>
+              <div>
+                <div style={labelStyle}>Prix</div>
+                <div style={{ ...valueStyle, color: TK.amber }}>{isFree ? "Entrée libre" : fmtFCFA(t.unitPrice)}</div>
+              </div>
+            </div>
+
+            <div style={{ display: "flex", justifyContent: "center", margin: "18px 0 12px" }}>
+              {seal ? (
+                <TicketQR value={seal.qrUrl} size={168} />
+              ) : sealErr ? (
+                <div
+                  style={{
+                    width: 168,
+                    height: 168,
+                    borderRadius: 12,
+                    background: "rgba(255,255,255,.08)",
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "center",
+                    padding: 12,
+                    textAlign: "center",
+                    fontSize: 11,
+                    color: TK.muted,
+                  }}
+                >
+                  QR indisponible — réessaie plus tard
+                </div>
+              ) : (
+                <div style={{ width: 168, height: 168, borderRadius: 12, background: "#FFFFFF", opacity: 0.5 }} />
+              )}
+            </div>
+
             <div
               style={{
-                fontSize: 11,
+                textAlign: "center",
+                fontFamily: "'Space Grotesk', monospace",
                 fontWeight: 700,
-                background: "rgba(255,122,26,.14)",
-                border: `1px solid ${C.amber}`,
-                color: C.amber,
-                borderRadius: 999,
-                padding: "4px 10px",
+                fontSize: 14,
+                color: TK.amber,
                 letterSpacing: 1,
-                textTransform: "uppercase",
-                whiteSpace: "nowrap",
+                textShadow: "0 1px 3px rgba(0,0,0,.6)",
               }}
             >
-              {t.tierName}
+              {t.id}
+            </div>
+
+            <div
+              style={{
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+                gap: 8,
+                marginTop: 12,
+                padding: "7px 12px",
+                borderRadius: 999,
+                background: "rgba(80,230,150,.12)",
+                border: `1px solid ${TK.green}`,
+                fontSize: 10.5,
+                fontWeight: 700,
+                color: TK.green,
+                flexWrap: "wrap",
+                textAlign: "center",
+              }}
+            >
+              🛡 VÉRIFIÉ {seal ? `HMAC · ${seal.sealShort}` : "…"}
             </div>
           </div>
-          <div style={{ fontFamily: "'Unbounded', sans-serif", fontWeight: 700, fontSize: 17, margin: "8px 0 6px" }}>{t.eventName}</div>
-          <div style={{ color: C.muted, fontSize: 13.5, lineHeight: 1.6 }}>
-            {t.date} à {t.time} · {t.venue}, {t.city}
-            <br />
-            Titulaire : <b style={{ color: C.text }}>{t.buyerName}</b>
-            {t.rank != null && (
-              <>
-                {" · "}
-                <b style={{ color: C.text }}>N°{t.rank}</b>
-              </>
-            )}
-            {t.momoNumber && (
-              <>
-                <br />
-                Organisateur : <b style={{ color: C.text }}>{t.momoNumber}</b>
-              </>
-            )}
-          </div>
         </div>
-        <Perf />
-        <div style={{ padding: "16px 20px 18px", display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12 }}>
-          <div>
-            <div style={{ fontSize: 11, color: C.muted, letterSpacing: 1, textTransform: "uppercase", fontWeight: 700 }}>Code d'entrée</div>
-            <div style={{ fontFamily: "'Unbounded', sans-serif", fontWeight: 700, fontSize: 15, color: C.amber, marginTop: 4 }}>{t.id}</div>
-          </div>
-          <TicketQR value={t.id} size={66} />
-        </div>
-        <div ref={actionsRef}>
+
+        {/* Actions (hors export) */}
+        <div style={{ background: C.surface }}>
+          {t.momoNumber && (
+            <div style={{ padding: "10px 18px", fontSize: 12, color: C.muted, borderTop: `1px solid ${C.line}` }}>
+              Organisateur : <b style={{ color: C.text }}>{t.momoNumber}</b>
+            </div>
+          )}
           <button
             onClick={download}
             disabled={downloading}
@@ -809,6 +999,7 @@ export default function TikeApp() {
   const [toast, setToast] = useState(null);
   const [loading, setLoading] = useState(true);
   const [purchaseWarning, setPurchaseWarning] = useState(false);
+  const [verifyParams] = useState(verifyParamsFromPath);
 
   const notify = (msg) => {
     setToast(msg);
@@ -902,6 +1093,13 @@ export default function TikeApp() {
   // #type=recovery dans l'URL : on doit montrer l'écran "nouveau mot de
   // passe" en priorité, avant tout routage normal basé sur la session.
   useEffect(() => {
+    // Lien de contrôle à l'entrée (/v/{ticketId}?s=...) : passe avant tout,
+    // ne nécessite aucune session — c'est la signature qui fait foi.
+    if (verifyParams) {
+      setView("verifyTicket");
+      setLoading(false);
+      return;
+    }
     if (typeof window !== "undefined" && window.location.hash.includes("type=recovery")) {
       setView("resetPassword");
       setLoading(false);
@@ -1074,6 +1272,7 @@ export default function TikeApp() {
             {view === "completeProfile" && pendingUser && (
               <CompleteProfile pendingUser={pendingUser} onDone={routeAfterAuth} />
             )}
+            {view === "verifyTicket" && verifyParams && <VerifyTicket ticketId={verifyParams.ticketId} signature={verifyParams.signature} />}
             {view === "faq" && <FAQ onBack={() => setView("home")} />}
             {view === "about" && <About onBack={() => setView("home")} />}
             {view === "contact" && <Contact onBack={() => setView("home")} />}
@@ -1291,17 +1490,15 @@ export default function TikeApp() {
                 profile={profile}
                 onBack={() => setView("kEvent")}
                 onPaid={async ({ buyerName, buyerPhone, qty, operator, tier }) => {
-                  const prefix = ticketPrefix(ev.name);
-                  const ids = Array.from({ length: qty }, () => `${prefix}-${genCode(6)}`);
+                  // Le prix est revalidé et les ID de billets sont générés côté
+                  // serveur (voir record_purchase) : rien n'est fait confiance ici.
                   const buyer = {
                     name: buyerName,
                     phone: buyerPhone,
                     qty,
                     operator,
                     tierId: tier.id,
-                    tierName: tier.name,
                     unitPrice: tier.price,
-                    ids,
                     ts: Date.now(),
                   };
                   try {
@@ -2034,6 +2231,100 @@ function CompleteProfile({ pendingUser, onDone }) {
           </button>
         </div>
       </Reveal>
+    </div>
+  );
+}
+
+/* ---------- Contrôle à l'entrée via lien signé (public, sans compte) ---------- */
+const VERIFY_STATUS_META = {
+  VALIDE: { icon: "✅", label: "Billet valide", color: TK.green, sub: "Accès autorisé — premier scan." },
+  DEJA_UTILISE: { icon: "⚠️", label: "Déjà utilisé", color: TK.amber, sub: "Ce billet a déjà été scanné." },
+  ANNULE: { icon: "🚫", label: "Billet annulé", color: TK.pink, sub: "Ce billet a été remboursé — accès refusé." },
+  SIGNATURE_INVALIDE: { icon: "⛔", label: "Billet invalide", color: TK.pink, sub: "La signature ne correspond pas — billet falsifié ou corrompu." },
+  INCONNU: { icon: "❓", label: "Billet introuvable", color: TK.pink, sub: "Aucun billet ne correspond à ce code." },
+  ERREUR: { icon: "⚠️", label: "Erreur réseau", color: TK.pink, sub: "Réessaie dans un instant." },
+};
+
+function VerifyTicket({ ticketId, signature }) {
+  const [checking, setChecking] = useState(true);
+  const [result, setResult] = useState(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    verifyTicketDB(ticketId, signature)
+      .then((r) => {
+        if (!cancelled) setResult(r);
+      })
+      .catch((e) => {
+        console.error(e);
+        if (!cancelled) setResult({ status: "ERREUR" });
+      })
+      .finally(() => {
+        if (!cancelled) setChecking(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [ticketId, signature]);
+
+  const meta = result ? VERIFY_STATUS_META[result.status] || VERIFY_STATUS_META.ERREUR : null;
+
+  return (
+    <div
+      style={{
+        position: "fixed",
+        inset: 0,
+        background: TK.bg,
+        display: "flex",
+        flexDirection: "column",
+        alignItems: "center",
+        justifyContent: "center",
+        padding: 24,
+        textAlign: "center",
+        fontFamily: "'Space Grotesk', sans-serif",
+        zIndex: 200,
+      }}
+    >
+      <div style={{ fontFamily: "'Unbounded', sans-serif", fontWeight: 900, fontSize: 22, color: TK.amber, marginBottom: 28 }}>
+        TIKÉ<span style={{ color: TK.pink }}>.</span>
+      </div>
+
+      {checking ? (
+        <div style={{ color: TK.muted, fontSize: 15 }}>Vérification du billet…</div>
+      ) : (
+        <>
+          <div style={{ fontSize: 56, marginBottom: 12 }}>{meta.icon}</div>
+          <div style={{ fontFamily: "'Unbounded', sans-serif", fontWeight: 800, fontSize: 24, color: meta.color, marginBottom: 8 }}>
+            {meta.label}
+          </div>
+          <div style={{ color: TK.muted, fontSize: 14, maxWidth: 320, lineHeight: 1.6 }}>{meta.sub}</div>
+
+          {result && (result.buyerName || result.eventName) && (
+            <div
+              style={{
+                marginTop: 24,
+                padding: "14px 20px",
+                borderRadius: 16,
+                background: "rgba(255,255,255,.06)",
+                border: "1px solid rgba(255,255,255,.12)",
+                maxWidth: 320,
+                width: "100%",
+                boxSizing: "border-box",
+              }}
+            >
+              {result.eventName && <div style={{ color: TK.text, fontWeight: 700, fontSize: 14.5 }}>{result.eventName}</div>}
+              {result.buyerName && <div style={{ color: TK.muted, fontSize: 13, marginTop: 4 }}>Titulaire : {result.buyerName}</div>}
+              {result.usedAt && (
+                <div style={{ color: TK.muted, fontSize: 12, marginTop: 4 }}>
+                  {result.status === "VALIDE" ? "Scanné à l'instant" : `Scanné le ${fmtDateTime(result.usedAt)}`}
+                </div>
+              )}
+            </div>
+          )}
+
+          <div style={{ color: TK.muted, fontSize: 11.5, marginTop: 16, fontFamily: "monospace", opacity: 0.7 }}>{ticketId}</div>
+        </>
+      )}
     </div>
   );
 }
@@ -3381,6 +3672,7 @@ function ClientDash({ profile, events, onLogout, onOpenEvent, onOpenedNew, notif
           posterUrl: e.posterUrl,
           momoNumber: e.momoNumber,
           tierName: b.tierName,
+          unitPrice: b.unitPrice,
           buyerName: b.name,
           ts: b.ts,
           eventDate: new Date(e.date + "T" + (e.time || "00:00")),

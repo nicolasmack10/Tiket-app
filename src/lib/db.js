@@ -162,6 +162,10 @@ export async function recordEventAccess(userId, eventCode) {
 }
 
 export async function addBuyerDB(eventCode, userId, buyer) {
+  // Le prix est revalidé côté serveur contre le vrai tarif de l'événement, et
+  // les ID de billets sont générés côté serveur (unicité garantie sur toute la
+  // plateforme, nécessaire pour la vérification par lien signé) : voir
+  // record_purchase.
   const { data, error } = await supabase.rpc("record_purchase", {
     p_event_code: eventCode,
     p_name: buyer.name,
@@ -169,13 +173,27 @@ export async function addBuyerDB(eventCode, userId, buyer) {
     p_qty: buyer.qty,
     p_operator: buyer.operator,
     p_tier_id: buyer.tierId,
-    p_tier_name: buyer.tierName,
     p_unit_price: buyer.unitPrice,
-    p_ticket_ids: buyer.ids,
     p_ts: buyer.ts,
   });
   if (error) throw error;
   return data; // [{ id, rank }, ...]
+}
+
+// Lien de vérification signé (HMAC) + sceau court pour un billet donné.
+// Réservé au titulaire du billet, à l'organisateur de l'événement, ou à l'admin.
+export async function getTicketSealDB(ticketId) {
+  const { data, error } = await supabase.rpc("get_ticket_seal", { p_ticket_id: ticketId }).maybeSingle();
+  if (error) throw error;
+  return data ? { qrUrl: data.qr_url, sealShort: data.seal_short } : null;
+}
+
+// Vérifie + consomme un billet via son lien signé (contrôle à l'entrée) :
+// appelable sans compte, la sécurité vient de la signature.
+export async function verifyTicketDB(ticketId, signature) {
+  const { data, error } = await supabase.rpc("verify_ticket", { p_ticket_id: ticketId, p_signature: signature });
+  if (error) throw error;
+  return data; // { status, usedAt?, eventName?, buyerName? }
 }
 
 /* ---------- Remboursements ---------- */
