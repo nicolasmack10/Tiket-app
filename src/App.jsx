@@ -827,6 +827,7 @@ function TicketCard({ t, i = 0, muted = false, refundStatus, onRequestRefund }) 
             <div style={{ fontSize: 10.5, fontWeight: 700, letterSpacing: 1.5, textTransform: "uppercase", color: TK.amber, textShadow: "0 1px 3px rgba(0,0,0,.6)" }}>
               {isFree ? "Laissez-passer" : "Billet"}
               {t.cancelled && <span style={{ color: TK.pink }}> · Annulé</span>}
+              {!t.cancelled && t.usedAt && <span style={{ color: TK.muted }}> · Déjà scanné</span>}
             </div>
             <div style={{ fontFamily: "'Unbounded', sans-serif", fontWeight: 800, fontSize: 18, color: TK.text, marginTop: 6, lineHeight: 1.25, textShadow: "0 1px 4px rgba(0,0,0,.6)" }}>
               {t.eventName}
@@ -899,26 +900,49 @@ function TicketCard({ t, i = 0, muted = false, refundStatus, onRequestRefund }) 
               {t.id}
             </div>
 
-            <div
-              style={{
-                display: "flex",
-                alignItems: "center",
-                justifyContent: "center",
-                gap: 8,
-                marginTop: 12,
-                padding: "7px 12px",
-                borderRadius: 999,
-                background: "rgba(80,230,150,.12)",
-                border: `1px solid ${TK.green}`,
-                fontSize: 10.5,
-                fontWeight: 700,
-                color: TK.green,
-                flexWrap: "wrap",
-                textAlign: "center",
-              }}
-            >
-              🛡 VÉRIFIÉ {seal ? `HMAC · ${seal.sealShort}` : "…"}
-            </div>
+            {t.usedAt ? (
+              <div
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  gap: 8,
+                  marginTop: 12,
+                  padding: "7px 12px",
+                  borderRadius: 999,
+                  background: "rgba(255,255,255,.08)",
+                  border: `1px solid ${TK.muted}`,
+                  fontSize: 10.5,
+                  fontWeight: 700,
+                  color: TK.muted,
+                  flexWrap: "wrap",
+                  textAlign: "center",
+                }}
+              >
+                ✅ Utilisé le {fmtDateTime(t.usedAt)}
+              </div>
+            ) : (
+              <div
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  gap: 8,
+                  marginTop: 12,
+                  padding: "7px 12px",
+                  borderRadius: 999,
+                  background: "rgba(80,230,150,.12)",
+                  border: `1px solid ${TK.green}`,
+                  fontSize: 10.5,
+                  fontWeight: 700,
+                  color: TK.green,
+                  flexWrap: "wrap",
+                  textAlign: "center",
+                }}
+              >
+                🛡 VÉRIFIÉ {seal ? `HMAC · ${seal.sealShort}` : "…"}
+              </div>
+            )}
           </div>
         </div>
 
@@ -3753,6 +3777,7 @@ function ClientDash({ profile, events, onLogout, onOpenEvent, onOpenedNew, notif
           tierName: b.tierName,
           unitPrice: b.unitPrice,
           buyerName: b.name,
+          usedAt: (e.used && e.used[entry.id]) || null,
           ts: b.ts,
           eventDate: new Date(e.date + "T" + (e.time || "00:00")),
         });
