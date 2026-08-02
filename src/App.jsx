@@ -1008,10 +1008,13 @@ export default function TikeApp() {
 
   const loadOrganizerEvents = useCallback(async (userId) => {
     try {
-      setEvents(await fetchOrganizerEvents(userId));
+      const fetched = await fetchOrganizerEvents(userId);
+      setEvents(fetched);
+      return fetched;
     } catch (e) {
       console.error(e);
       notify("Impossible de charger tes événements.");
+      return {};
     }
   }, []);
 
@@ -1038,10 +1041,13 @@ export default function TikeApp() {
 
   const loadAdminData = useCallback(async () => {
     try {
-      setAdminData(await fetchAdminOverview());
+      const fetched = await fetchAdminOverview();
+      setAdminData(fetched);
+      return fetched;
     } catch (e) {
       console.error(e);
       notify("Impossible de charger les données admin.");
+      return null;
     }
   }, []);
 
@@ -1073,16 +1079,28 @@ export default function TikeApp() {
     async (p) => {
       setProfile(p);
       setPendingUser(null);
+      const code = pendingCode.current;
+      pendingCode.current = null;
       if (p.role === "organizer") {
-        await loadOrganizerEvents(p.id);
-        setView("cDash");
+        const orgEvents = await loadOrganizerEvents(p.id);
+        if (code && orgEvents[code]) {
+          setActiveCode(code);
+          setView("cEvent");
+        } else {
+          if (code) notify("Ce lien pointe vers un événement que tu ne gères pas — connecte-toi avec un compte client pour l'ouvrir.");
+          setView("cDash");
+        }
       } else if (p.role === "admin") {
-        await loadAdminData();
-        setView("adminDash");
+        const admin = await loadAdminData();
+        const adminMatch = code && admin && admin.events.find((e) => e.code === code);
+        if (adminMatch) {
+          setActiveCode(code);
+          setView("adminEventDetail");
+        } else {
+          setView("adminDash");
+        }
       } else {
         await loadClientEvents(p.id);
-        const code = pendingCode.current;
-        pendingCode.current = null;
         if (!code || !(await openSharedEvent(p.id, code))) setView("clientDash");
       }
     },
