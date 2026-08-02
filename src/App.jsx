@@ -3534,6 +3534,12 @@ function Scanner({ ev, onBack, onMarkUsed, onRefresh }) {
 
   const startCamera = async () => {
     setCameraErr("");
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+      setCameraErr(
+        "La caméra n'est pas accessible dans ce navigateur. Si tu as ouvert ce lien depuis WhatsApp ou une autre appli, ouvre-le plutôt dans Chrome ou Safari — sinon, utilise la saisie manuelle ci-dessous."
+      );
+      return;
+    }
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" } });
       streamRef.current = stream;
@@ -3545,7 +3551,15 @@ function Scanner({ ev, onBack, onMarkUsed, onRefresh }) {
       rafRef.current = requestAnimationFrame(loop);
     } catch (e) {
       console.error(e);
-      setCameraErr("Impossible d'accéder à la caméra — utilise la saisie manuelle ci-dessous.");
+      let msg = "Impossible d'accéder à la caméra — utilise la saisie manuelle ci-dessous.";
+      if (e.name === "NotAllowedError" || e.name === "SecurityError") {
+        msg = "Accès à la caméra refusé. Autorise la caméra pour ce site dans les réglages de ton navigateur (souvent : appuie sur le cadenas à côté de l'adresse), puis réessaie.";
+      } else if (e.name === "NotFoundError" || e.name === "OverconstrainedError") {
+        msg = "Aucune caméra détectée sur cet appareil — utilise la saisie manuelle ci-dessous.";
+      } else if (e.name === "NotReadableError") {
+        msg = "La caméra est déjà utilisée par une autre application — ferme-la et réessaie.";
+      }
+      setCameraErr(msg);
     }
   };
 
