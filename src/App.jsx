@@ -832,8 +832,13 @@ function TicketCard({ t, i = 0, muted = false, refundStatus, onRequestRefund }) 
               {t.eventName}
             </div>
             <div style={{ fontSize: 12, color: TK.muted, marginTop: 4, textShadow: "0 1px 3px rgba(0,0,0,.6)" }}>
-              Titulaire : <b style={{ color: TK.text }}>{t.buyerName}</b>
-              {t.rank != null && <> · N°{t.rank}</>}
+              {t.buyerName && (
+                <>
+                  Titulaire : <b style={{ color: TK.text }}>{t.buyerName}</b>
+                  {t.rank != null && " · "}
+                </>
+              )}
+              {t.rank != null && <>N°{t.rank}</>}
             </div>
 
             <div style={{ marginTop: 14 }}>
@@ -2475,7 +2480,7 @@ function CreatorDash({ profile, events, onLogout, onNew, onOpen }) {
                 <div style={{ width: 7, height: 7, borderRadius: "50%", background: C.green, flexShrink: 0 }} />
                 <div style={{ flex: 1, minWidth: 0 }}>
                   <div style={{ fontWeight: 700, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
-                    {b.name} · {b.qty} × {b.tierName}
+                    {b.name || "Client sans nom"} · {b.qty} × {b.tierName}
                   </div>
                   <div style={{ color: C.muted, fontSize: 11.5 }}>{b.eventName}</div>
                 </div>
@@ -2549,6 +2554,7 @@ function NewEvent({ profile, onBack, onCreate }) {
   const [posterPreview, setPosterPreview] = useState(null);
   const [posterErr, setPosterErr] = useState("");
   const [queueEnabled, setQueueEnabled] = useState(false);
+  const [requireBuyerName, setRequireBuyerName] = useState(true);
   const [creating, setCreating] = useState(false);
   const set = (k) => (e) => setF({ ...f, [k]: e.target.value });
 
@@ -2608,6 +2614,7 @@ function NewEvent({ profile, onBack, onCreate }) {
       desc: f.desc,
       posterUrl,
       queueEnabled,
+      requireBuyerName,
       tiers: tiers.map((t) => ({ id: t.id, name: t.name.trim(), price: Number(t.price), capacity: Number(t.capacity) })),
       buyers: [],
       used: {},
@@ -2731,6 +2738,60 @@ function NewEvent({ profile, onBack, onCreate }) {
         </button>
       </Reveal>
 
+      <Reveal i={2.5}>
+        <button
+          type="button"
+          onClick={() => setRequireBuyerName((v) => !v)}
+          className="tk-press"
+          style={{
+            ...S.card,
+            width: "100%",
+            marginBottom: 16,
+            display: "flex",
+            alignItems: "center",
+            gap: 14,
+            textAlign: "left",
+            cursor: "pointer",
+            border: `1px solid ${requireBuyerName ? C.amber : C.line}`,
+          }}
+        >
+          <div
+            style={{
+              width: 44,
+              height: 26,
+              borderRadius: 999,
+              background: requireBuyerName ? C.amber : C.surface2,
+              border: `1px solid ${requireBuyerName ? C.amber : C.line}`,
+              position: "relative",
+              flexShrink: 0,
+              transition: "background .2s ease",
+            }}
+          >
+            <div
+              style={{
+                position: "absolute",
+                top: 2,
+                left: requireBuyerName ? 20 : 2,
+                width: 20,
+                height: 20,
+                borderRadius: "50%",
+                background: "#FFFFFF",
+                transition: "left .2s ease",
+                boxShadow: "0 1px 3px rgba(28,21,51,.3)",
+              }}
+            />
+          </div>
+          <div>
+            <div style={{ fontWeight: 700, fontSize: 14.5 }}>Nom et prénom sur le billet</div>
+            <div style={{ color: C.muted, fontSize: 12.5, marginTop: 2, lineHeight: 1.5 }}>
+              {requireBuyerName
+                ? "Le client doit indiquer son nom et prénom à l'achat, affiché sur le billet."
+                : "Le client peut acheter sans donner son nom — le billet n'affichera pas de titulaire."}
+            </div>
+          </div>
+        </button>
+      </Reveal>
+
       <Reveal i={3}>
         <div style={{ ...S.card, marginBottom: 16 }}>
           <div style={{ ...S.label, marginBottom: 4 }}>Catégories de billets</div>
@@ -2842,7 +2903,7 @@ function BuyersList({ ev, title = "Acheteurs" }) {
               <div style={{ display: "flex", justifyContent: "space-between", fontSize: 14, gap: 10 }}>
                 <div>
                   <div style={{ fontWeight: 700 }}>
-                    {b.name}
+                    {b.name || "Client sans nom"}
                     {b.cancelled && (
                       <span style={{ color: C.pink, fontWeight: 700, fontSize: 11, marginLeft: 8, textTransform: "uppercase" }}>
                         Annulé
@@ -3284,7 +3345,7 @@ function CreatorEvent({ ev, onBack, onScan, notify, onWithdraw }) {
                   }}
                 >
                   <div style={{ flex: 1, minWidth: 0 }}>
-                    <div style={{ fontWeight: 700, fontSize: 14 }}>{b ? b.name : "Commande"}</div>
+                    <div style={{ fontWeight: 700, fontSize: 14 }}>{b ? b.name || "Client sans nom" : "Commande"}</div>
                     <div style={{ color: C.muted, fontSize: 12 }}>
                       {b ? `${b.qty} × ${b.tierName} · ${fmtFCFA(b.qty * b.unitPrice)}` : "Détails indisponibles"}
                     </div>
@@ -3365,7 +3426,7 @@ function Scanner({ ev, onBack, onMarkUsed, onRefresh }) {
   const findTicket = (id) => {
     for (const b of ev.buyers) {
       const entry = b.ids.find((x) => x.id === id);
-      if (entry) return { holder: b.name, phone: b.phone, tierName: b.tierName, rank: entry.rank, cancelled: b.cancelled };
+      if (entry) return { holder: b.name || "Client sans nom", phone: b.phone, tierName: b.tierName, rank: entry.rank, cancelled: b.cancelled };
     }
     return null;
   };
@@ -3933,7 +3994,10 @@ function Payment({ ev, profile, onBack, onPaid }) {
 
   useEffect(() => {
     if (step === 3) {
-      const t = setTimeout(() => onPaid({ buyerName: name, buyerPhone: phone, qty, operator: op, tier }), 2600);
+      const t = setTimeout(
+        () => onPaid({ buyerName: ev.requireBuyerName ? name : null, buyerPhone: phone, qty, operator: op, tier }),
+        2600
+      );
       return () => clearTimeout(t);
     }
   }, [step]); // eslint-disable-line
@@ -3979,8 +4043,12 @@ function Payment({ ev, profile, onBack, onPaid }) {
             })}
           </div>
 
-          <label style={S.label}>Ton nom (sur le billet)</label>
-          <input style={S.input} value={name} onChange={(e) => setName(e.target.value)} placeholder="Nom complet" />
+          {ev.requireBuyerName && (
+            <>
+              <label style={S.label}>Ton nom (sur le billet)</label>
+              <input style={S.input} value={name} onChange={(e) => setName(e.target.value)} placeholder="Nom complet" />
+            </>
+          )}
           <label style={S.label}>Numéro mobile money</label>
           <input style={S.input} value={phone} onChange={(e) => setPhone(e.target.value)} placeholder="06 XXX XX XX" inputMode="tel" />
 
@@ -4042,8 +4110,8 @@ function Payment({ ev, profile, onBack, onPaid }) {
           </div>
           <button
             className="tk-press"
-            style={{ ...S.btn, opacity: name && phone && op && tier ? 1 : 0.4 }}
-            disabled={!name || !phone || !op || !tier}
+            style={{ ...S.btn, opacity: (!ev.requireBuyerName || name) && phone && op && tier ? 1 : 0.4 }}
+            disabled={(ev.requireBuyerName && !name) || !phone || !op || !tier}
             onClick={() => setStep(2)}
           >
             Payer {tier ? fmtFCFA(total) : ""}
