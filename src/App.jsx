@@ -3704,7 +3704,14 @@ function ClientDash({ profile, events, onLogout, onOpenEvent, onOpenedNew, notif
   const shown = tab === "active" ? active : history;
 
   const openByCode = async () => {
-    const clean = code.trim().toUpperCase().replace(/^HTTPS?:\/\/TIKE\.APP\/E\//, "");
+    // Le domaine réel (tiketapp-phi.vercel.app) était codé en dur à tort ici
+    // sous un ancien nom ("tike.app") jamais déployé : coller le vrai lien
+    // partagé ne matchait donc jamais et échouait silencieusement. On extrait
+    // désormais le code depuis /e/CODE quel que soit le domaine, avec repli
+    // sur la saisie brute si ce n'est pas une URL.
+    const raw = code.trim();
+    const pathMatch = raw.match(/\/e\/([A-Za-z0-9]+)/i);
+    const clean = (pathMatch ? pathMatch[1] : raw).toUpperCase();
     if (!clean || busy) return;
     setErr("");
     setBusy(true);
@@ -3740,7 +3747,7 @@ function ClientDash({ profile, events, onLogout, onOpenEvent, onOpenedNew, notif
               setCode(e.target.value);
               setErr("");
             }}
-            placeholder="https://tike.app/e/ABC123 ou ABC123"
+            placeholder="Colle le lien reçu, ou entre juste le code (ex. ABC123)"
             onKeyDown={(e) => e.key === "Enter" && openByCode()}
           />
           {err && <div style={{ color: C.pink, fontSize: 13, marginBottom: 12 }}>{err}</div>}
