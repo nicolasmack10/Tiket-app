@@ -3455,9 +3455,18 @@ function Scanner({ ev, onBack, onMarkUsed, onRefresh }) {
     return null;
   };
 
+  // Le QR encode désormais un lien de vérification signé (/v/{id}?s=...), pas
+  // seulement l'ID du billet — la caméra lit ce lien tel quel. On en extrait
+  // l'ID quel que soit le format scanné (lien complet ou code saisi à la main).
+  const extractTicketId = (raw) => {
+    const trimmed = (raw || "").trim();
+    const m = trimmed.match(/\/v\/([A-Za-z0-9-]+)/i);
+    return (m ? m[1] : trimmed).toUpperCase();
+  };
+
   const check = useCallback(
     (rawId) => {
-      const id = (rawId ?? input).trim().toUpperCase();
+      const id = extractTicketId(rawId ?? input);
       if (!id) return;
       setScanning(true);
       setResult(null);
