@@ -1305,6 +1305,7 @@ export default function TikeApp() {
                 onBack={() => setView("home")}
                 onDone={handleAuthDone}
                 onForgotPassword={() => setView("forgotPassword")}
+                onViewTerms={() => setView("organizerTerms")}
               />
             )}
             {view === "forgotPassword" && <ForgotPassword onBack={() => setView("auth")} />}
@@ -1323,6 +1324,7 @@ export default function TikeApp() {
             {view === "faq" && <FAQ onBack={() => setView("home")} />}
             {view === "about" && <About onBack={() => setView("home")} />}
             {view === "contact" && <Contact onBack={() => setView("home")} />}
+            {view === "organizerTerms" && <OrganizerTerms onBack={() => setView("auth")} />}
 
             {view === "cDash" && profile && (
               <CreatorDash
@@ -1883,6 +1885,64 @@ function About({ onBack }) {
   );
 }
 
+function OrganizerTerms({ onBack }) {
+  const item = (title, children) => (
+    <div style={{ marginBottom: 18 }}>
+      <div style={{ fontFamily: "'Unbounded', sans-serif", fontWeight: 700, fontSize: 14, marginBottom: 6 }}>{title}</div>
+      <div style={{ color: C.muted, fontSize: 13.5, lineHeight: 1.7 }}>{children}</div>
+    </div>
+  );
+  return (
+    <StaticPage title="Conditions d'utilisation — Organisateurs" onBack={onBack}>
+      <div style={{ color: C.muted, fontSize: 12.5, marginBottom: 20 }}>
+        En créant ou en utilisant un compte organisateur, tu acceptes les conditions ci-dessous.
+      </div>
+
+      {item(
+        "1. Objet",
+        "TIKÉ est un outil de billetterie : il te permet de créer un lien de vente et d'encaisser tes billets par mobile money (MTN MoMo, Airtel Money). TIKÉ n'est pas une agence événementielle et n'organise aucun événement."
+      )}
+      {item(
+        "2. Compte organisateur",
+        "Les informations fournies à la création de ton compte (nom, numéro mobile money) doivent être exactes et t'appartenir. Le numéro mobile money renseigné à la création d'un événement est celui qui reçoit les retraits pour cet événement : il doit être correct, sa saisie est redemandée à chaque retrait pour confirmation."
+      )}
+      {item(
+        "3. Événements",
+        "Tu es seul responsable du contenu, de la légalité et du bon déroulement de tes événements (autorisations nécessaires, sécurité du lieu, respect des lois locales). TIKÉ n'intervient à aucun moment dans l'organisation de l'événement lui-même."
+      )}
+      {item(
+        "4. Commission",
+        "Une commission est prélevée sur chaque billet vendu : 10% pour un billet à 5 000 FCFA ou moins, 20% au-delà. Un taux personnalisé peut, à titre exceptionnel, être appliqué par l'administrateur de la plateforme ; il est alors visible dans le tableau de bord de l'événement concerné."
+      )}
+      {item(
+        "5. Retraits",
+        "Les fonds disponibles (revenus des ventes moins la commission et les retraits déjà effectués) peuvent être retirés vers le numéro mobile money renseigné à la création de l'événement. Chaque retrait exige une raison et une confirmation. L'historique des retraits est permanent et ne peut pas être supprimé."
+      )}
+      {item(
+        "6. Annulations et remboursements",
+        "Un client peut te demander un remboursement depuis son billet ; toi seul décides de l'approuver ou de le refuser. Un billet remboursé est définitivement annulé et ne peut plus être scanné à l'entrée."
+      )}
+      {item(
+        "7. Contrôle d'entrée",
+        "Chaque billet porte un QR code signé, à usage unique : le premier scan valide l'entrée, tout scan suivant du même billet est signalé comme déjà utilisé. Le contrôle d'entrée (scanner ou lien de vérification) relève de ta responsabilité."
+      )}
+      {item(
+        "8. Nom du client sur le billet",
+        "Tu choisis, événement par événement, si le nom et prénom du client sont demandés à l'achat et affichés sur le billet."
+      )}
+      {item(
+        "9. Suspension et résiliation",
+        "TIKÉ peut suspendre un compte organisateur en cas de fraude avérée, de non-respect de ces conditions, ou d'événement manifestement illégal. Un compte suspendu ne peut plus créer d'événement, encaisser de vente ni retirer de fonds."
+      )}
+      {item(
+        "10. Responsabilité",
+        "TIKÉ fournit un outil technique et n'est pas partie à la relation entre toi et tes clients. Tu restes seul responsable des obligations légales et fiscales liées à ton activité et à tes événements."
+      )}
+      {item("11. Modifications", "Ces conditions peuvent évoluer ; les changements s'appliquent aux événements créés après leur mise à jour.")}
+    </StaticPage>
+  );
+}
+
 function Contact({ onBack }) {
   return (
     <StaticPage title="Nous contacter" onBack={onBack}>
@@ -1937,7 +1997,7 @@ function GoogleButton({ busy, onClick }) {
   );
 }
 
-function Auth({ role, onBack, onDone, onForgotPassword }) {
+function Auth({ role, onBack, onDone, onForgotPassword, onViewTerms }) {
   const [mode, setMode] = useState("login");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -2088,6 +2148,28 @@ function Auth({ role, onBack, onDone, onForgotPassword }) {
           {role === "organizer" && mode === "signup" && (
             <div style={{ color: C.muted, fontSize: 12.5, marginTop: 12, lineHeight: 1.5 }}>
               Les fonds des ventes sont reversés sur ce numéro. Tu ne verras que tes propres événements.
+              <br />
+              En créant ce compte, tu acceptes nos{" "}
+              <button
+                type="button"
+                onClick={onViewTerms}
+                className="tk-press"
+                style={{
+                  background: "none",
+                  border: "none",
+                  padding: 0,
+                  color: C.amber,
+                  fontWeight: 700,
+                  fontSize: 12.5,
+                  cursor: "pointer",
+                  textDecoration: "underline",
+                  textUnderlineOffset: 2,
+                  fontFamily: "'Space Grotesk', sans-serif",
+                }}
+              >
+                conditions d'utilisation organisateurs
+              </button>
+              .
             </div>
           )}
         </div>
