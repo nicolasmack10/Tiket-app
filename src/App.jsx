@@ -29,6 +29,7 @@ import {
   resolveRefundDB,
   getTicketSealDB,
   verifyTicketDB,
+  updateTierCapacityDB,
 } from "./lib/db";
 import {
   getSessionProfile,
@@ -676,6 +677,97 @@ function TierSplit({ ev }) {
           </div>
         </div>
       ))}
+    </div>
+  );
+}
+
+/* ---------- Gestion du nombre de places par catégorie ---------- */
+function TierCapacityEditor({ ev, onUpdateCapacity }) {
+  const [editingId, setEditingId] = useState(null);
+  const [value, setValue] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [err, setErr] = useState("");
+
+  const startEdit = (t) => {
+    setEditingId(t.id);
+    setValue(String(t.capacity));
+    setErr("");
+  };
+
+  const save = async (t) => {
+    const n = Number(value);
+    if (!Number.isInteger(n) || n <= 0) {
+      setErr("Nombre de places invalide.");
+      return;
+    }
+    setSaving(true);
+    setErr("");
+    try {
+      await onUpdateCapacity(t.id, n);
+      setEditingId(null);
+    } catch (e) {
+      setErr(e.message || "Échec de la mise à jour.");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div>
+      {ev.tiers.map((t, i) => {
+        const sold = tierSold(ev, t.id);
+        const editing = editingId === t.id;
+        return (
+          <div key={t.id} style={{ padding: "10px 0", borderBottom: i < ev.tiers.length - 1 ? `1px solid ${C.line}` : "none" }}>
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10 }}>
+              <div>
+                <div style={{ fontWeight: 700, fontSize: 14 }}>{t.name}</div>
+                <div style={{ color: C.muted, fontSize: 12 }}>
+                  {sold} vendu{sold > 1 ? "s" : ""}
+                </div>
+              </div>
+              {!editing ? (
+                <button
+                  onClick={() => startEdit(t)}
+                  className="tk-press"
+                  style={{ ...S.btnGhost, width: "auto", marginBottom: 0, padding: "9px 14px", fontSize: 13.5, whiteSpace: "nowrap" }}
+                >
+                  {t.capacity} places ✎
+                </button>
+              ) : (
+                <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                  <input
+                    type="number"
+                    inputMode="numeric"
+                    min={sold || 1}
+                    autoFocus
+                    value={value}
+                    onChange={(e) => setValue(e.target.value)}
+                    style={{ ...S.input, width: 72, marginBottom: 0, textAlign: "center" }}
+                  />
+                  <button
+                    onClick={() => save(t)}
+                    disabled={saving}
+                    className="tk-press"
+                    style={{ ...S.btn, width: "auto", marginBottom: 0, padding: "11px 16px", fontSize: 13.5, opacity: saving ? 0.6 : 1 }}
+                  >
+                    {saving ? "…" : "OK"}
+                  </button>
+                  <button
+                    onClick={() => setEditingId(null)}
+                    disabled={saving}
+                    className="tk-press"
+                    style={{ background: "none", border: "none", color: C.muted, cursor: "pointer", fontSize: 20, lineHeight: 1, padding: 4 }}
+                  >
+                    ×
+                  </button>
+                </div>
+              )}
+            </div>
+            {editing && err && <div style={{ color: C.pink, fontSize: 12, marginTop: 6 }}>{err}</div>}
+          </div>
+        );
+      })}
     </div>
   );
 }
@@ -1378,6 +1470,10 @@ export default function TikeApp() {
                   }));
                   notify("Fonds retirés !");
                   return actual;
+                }}
+                onUpdateCapacity={async (tierId, newCapacity) => {
+                  const newTiers = await updateTierCapacityDB(ev.code, tierId, newCapacity);
+                  setEvents((prev) => ({ ...prev, [ev.code]: { ...prev[ev.code], tiers: newTiers } }));
                 }}
               />
             )}
@@ -3057,7 +3153,7 @@ function BuyersList({ ev, title = "Acheteurs" }) {
 }
 
 /* ---------- TABLEAU DE BORD ÉVÉNEMENT ---------- */
-function CreatorEvent({ ev, onBack, onScan, notify, onWithdraw }) {
+function CreatorEvent({ ev, onBack, onScan, notify, onWithdraw, onUpdateCapacity }) {
   const [withdrawing, setWithdrawing] = useState(false);
   const [withdrawModal, setWithdrawModal] = useState(null); // null | "form" | "confirm"
   const [wPhone, setWPhone] = useState("");
@@ -3430,6 +3526,17 @@ function CreatorEvent({ ev, onBack, onScan, notify, onWithdraw }) {
         <div style={{ ...S.card, marginBottom: 14 }}>
           <div style={{ ...S.label, marginBottom: 12 }}>Répartition par catégorie</div>
           <TierSplit ev={ev} />
+        </div>
+      </Reveal>
+
+      {/* Nombre de places */}
+      <Reveal i={6.5}>
+        <div style={{ ...S.card, marginBottom: 14 }}>
+          <div style={{ ...S.label, marginBottom: 4 }}>Places par catégorie</div>
+          <div style={{ color: C.muted, fontSize: 12.5, marginBottom: 8, lineHeight: 1.5 }}>
+            Modifiable à tout moment — ne peut pas descendre sous le nombre de billets déjà vendus.
+          </div>
+          <TierCapacityEditor ev={ev} onUpdateCapacity={onUpdateCapacity} />
         </div>
       </Reveal>
 

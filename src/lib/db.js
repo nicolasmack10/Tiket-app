@@ -273,6 +273,18 @@ export async function setCommissionOverrideDB(code, pct) {
   if (error) throw error;
 }
 
+// Le nouveau nombre de places est revalidé côté serveur (ne peut pas descendre
+// sous le nombre de billets déjà vendus) : voir update_tier_capacity.
+export async function updateTierCapacityDB(eventCode, tierId, newCapacity) {
+  const { data, error } = await supabase.rpc("update_tier_capacity", {
+    p_event_code: eventCode,
+    p_tier_id: tierId,
+    p_new_capacity: newCapacity,
+  });
+  if (error) throw error;
+  return data; // tiers array à jour
+}
+
 /* ---------- Salle d'attente avant achat ---------- */
 export async function joinQueueDB(eventCode, userId) {
   const { data: existing, error: e1 } = await supabase
