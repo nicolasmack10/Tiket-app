@@ -1522,6 +1522,7 @@ export default function TikeApp() {
                 onOpenEvent={(code) => {
                   setActiveCode(code);
                   setView("kEvent");
+                  refreshEvent(code);
                 }}
                 onOpenedNew={(code, e) => setEvents((prev) => ({ ...prev, [code]: e }))}
                 notify={notify}
@@ -4041,7 +4042,9 @@ function ClientDash({ profile, events, onLogout, onOpenEvent, onOpenedNew, notif
 function ClientEvent({ ev, onBack, onBuy }) {
   const d = ev.date ? new Date(ev.date + "T" + (ev.time || "00:00")) : null;
   const dateStr = d ? d.toLocaleDateString("fr-FR", { weekday: "long", day: "numeric", month: "long", year: "numeric" }) : ev.date;
+  const closed = d && d.getTime() < Date.now();
   const anyLeft = ev.tiers.some((t) => t.capacity - tierSold(ev, t.id) > 0);
+  const canBuy = !closed && anyLeft;
 
   return (
     <div>
@@ -4095,8 +4098,13 @@ function ClientEvent({ ev, onBack, onBuy }) {
               );
             })}
 
-            <button className="tk-press" style={{ ...S.btn, marginTop: 18, opacity: anyLeft ? 1 : 0.4 }} disabled={!anyLeft} onClick={onBuy}>
-              {anyLeft ? "Acheter mon billet" : "Complet"}
+            {closed && (
+              <div style={{ color: C.pink, fontSize: 12.5, marginTop: 14, textAlign: "center" }}>
+                Cet événement a déjà eu lieu — la billetterie est fermée.
+              </div>
+            )}
+            <button className="tk-press" style={{ ...S.btn, marginTop: closed ? 8 : 18, opacity: canBuy ? 1 : 0.4 }} disabled={!canBuy} onClick={onBuy}>
+              {closed ? "Billetterie fermée" : anyLeft ? "Acheter mon billet" : "Complet"}
             </button>
           </div>
         </div>
